@@ -19,6 +19,11 @@ features:
       type: message
       callback_id: create_github_issue
       description: File a GitHub issue from this message
+  slash_commands:
+    - command: /issue
+      description: Create a GitHub issue
+      usage_hint: "[title]"
+      should_escape: false
 
 oauth_config:
   scopes:

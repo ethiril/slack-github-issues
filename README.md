@@ -38,8 +38,9 @@ This pre-configures Socket Mode, all bot scopes, and the message shortcut automa
 
 #### Option A: Personal access token (personal accounts or small teams)
 
-Go to [github.com/settings/tokens](https://github.com/settings/tokens) and create a **fine-grained personal access token** with:
+Go to [github.com/settings/tokens](https://github.com/settings/tokens) and choose one of:
 
+**Fine-grained token** (issues only, no Projects support):
 - **Resource owner**: your org (or your user account)
 - **Repository access**: All repositories (or select specific ones)
 - **Permissions**:
@@ -48,7 +49,14 @@ Go to [github.com/settings/tokens](https://github.com/settings/tokens) and creat
 
 > **Note**: Fine-grained tokens scoped to an org require an org admin to approve them under **Organization Settings → Personal access token policies**.
 
-If you want **Projects** support, you also need the **classic** token with the `project` scope (fine-grained tokens don't support Projects v2 GraphQL yet as of early 2025 — check if this has changed).
+**Classic token** (required if you want milestones + Projects support):
+- Go to [github.com/settings/tokens](https://github.com/settings/tokens) → **Generate new token (classic)**
+- Select scopes:
+  - `repo` (full repo access, includes issues and milestones)
+  - `project` (required for Projects v2)
+- Click **Generate token**
+
+> Fine-grained tokens do not support the Projects v2 GraphQL API. If the Projects dropdown is empty, switch to a classic token.
 
 #### Option B: GitHub App (recommended for organizations)
 
@@ -78,13 +86,11 @@ cd slack-github-issues
 # Install dependencies
 npm install
 
-# Create your .env from the template
-cp .env.example .env
-# Edit .env with your tokens:
-#   SLACK_BOT_TOKEN=xoxb-...
-#   SLACK_APP_TOKEN=xapp-...
-#   GITHUB_TOKEN=ghp_...
-#   GITHUB_OWNER=your-org
+# Set required environment variables
+export SLACK_BOT_TOKEN=xoxb-...
+export SLACK_APP_TOKEN=xapp-...
+export GITHUB_TOKEN=ghp_...
+export GITHUB_OWNER=your-org
 
 # Run it
 npm start
@@ -93,7 +99,7 @@ npm start
 You should see:
 
 ```
-⚡ slack-github-issues is running (Socket Mode)
+slack-github-issues is running (Socket Mode)
 ```
 
 ### 4. Test It
@@ -108,9 +114,22 @@ You should see:
 
 ---
 
+## Deployment Modes
+
+The app detects its mode from environment variables:
+
+- **`SLACK_APP_TOKEN` is set** → Socket Mode (persistent WebSocket, no inbound URL required)
+- **`SLACK_APP_TOKEN` is absent** → HTTP mode (Lambda-compatible, requires `SLACK_SIGNING_SECRET` and a public HTTPS endpoint)
+
+For HTTP mode, enable interactivity in your Slack app (**Interactivity & Shortcuts → Request URL**) and point it at your Lambda Function URL.
+
+---
+
 ## Running in Production
 
-Since this uses Socket Mode, you just need a long-running process. A few lightweight options:
+### Socket Mode
+
+Since Socket Mode uses an outbound WebSocket, you just need a long-running process. A few lightweight options:
 
 **systemd** (on any Linux box / EC2):
 ```ini
@@ -139,7 +158,20 @@ docker build -t slack-github-issues .
 docker run -d --env-file .env --restart=unless-stopped slack-github-issues
 ```
 
-### AWS ECS Fargate
+### AWS Lambda (HTTP mode)
+
+Deploy as a Lambda function with a Function URL — no VPC, no ALB, no persistent process needed. Effectively free at this usage level.
+
+1. Bundle the app (e.g. with `esbuild` or `zip` with `node_modules`)
+2. Create a Lambda function (Node.js 20+, handler: `app.handler`)
+3. Enable a **Function URL** (auth type: `NONE` — Slack verifies requests via signing secret)
+4. Set environment variables: `SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`, `GITHUB_TOKEN`, `GITHUB_OWNER`
+5. In your Slack app settings, go to **Interactivity & Shortcuts → Request URL** and enter the Function URL
+6. Do the same under **OAuth & Permissions → Redirect URLs** if needed
+
+> **Note**: Do _not_ set `SLACK_APP_TOKEN` — its absence is what switches the app into HTTP mode.
+
+### AWS ECS Fargate (Socket Mode)
 
 The repo includes a CloudFormation template and deploy script. Socket Mode means **no ALB, no public IP, no inbound security group rules** — just an outbound-only Fargate task.
 
@@ -169,11 +201,36 @@ This creates an ECR repo, pushes the image, stores tokens in Secrets Manager, an
 
 | Variable | Required | Description |
 |---|---|---|
-| `SLACK_BOT_TOKEN` | ✅ | Bot token (`xoxb-…`) |
-| `SLACK_APP_TOKEN` | ✅ | App-level token for Socket Mode (`xapp-…`) |
-| `GITHUB_TOKEN` | ✅ | Personal access token with `repo` + `project` scopes |
-| `GITHUB_OWNER` | ✅ | GitHub org or username |
-| `GITHUB_REPOS` | ❌ | Comma-separated repo names to show (omit to list all) |
+| `SLACK_BOT_TOKEN` | required | Bot token (`xoxb-…`) |
+| `SLACK_APP_TOKEN` | Socket Mode only | App-level token (`xapp-…`). Its presence enables Socket Mode. |
+| `SLACK_SIGNING_SECRET` | HTTP/Lambda only | Signing secret for request verification. Required when `SLACK_APP_TOKEN` is absent. |
+| `GITHUB_TOKEN` | required | Personal access token with `repo` + `project` scopes |
+| `GITHUB_OWNER` | required | GitHub org or username |
+| `GITHUB_REPOS` | optional | Comma-separated repo names to show (omit to list all) |
+| `DEFAULT_GITHUB_PROJECT` | optional | Project name to pre-select in the modal (must match the project title exactly) |
+
+---
+
+## Usage
+
+### Message shortcut
+
+Right-click (or long-press) any Slack message → **Create GitHub Issue**. The message text is pre-filled as the issue body.
+
+### /issue slash command
+
+```
+/issue
+/issue Fix the login bug
+```
+
+Opens the same modal with the title pre-filled from the command text. Useful when the issue isn't tied to a specific message.
+
+### Defaults
+
+The modal remembers each user's last-used repo, project, milestone, and labels, and pre-selects them the next time they open it. Defaults reset on app restart.
+
+Set `DEFAULT_GITHUB_PROJECT` to pre-select a project for all users regardless of history.
 
 ---
 

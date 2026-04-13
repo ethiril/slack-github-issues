@@ -48,5 +48,5 @@ aws cloudformation deploy \
     SubnetIds="${SUBNET_IDS:?Set SUBNET_IDS (comma-separated)}"
 
 echo ""
-echo "✅ Deployed! Check logs with:"
+echo "Deployed! Check logs with:"
 echo "   aws logs tail /ecs/slack-github-issues --follow --region $AWS_REGION"
