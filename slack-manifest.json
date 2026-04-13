@@ -1,0 +1,53 @@
+{
+  "display_information": {
+    "name": "GitHub Butler",
+    "description": "Create GitHub issues from any Slack message",
+    "background_color": "#280137"
+  },
+  "settings": {
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": true,
+    "event_subscriptions": {
+      "bot_events": ["app_mention"]
+    },
+    "interactivity": {
+      "is_enabled": true
+    },
+    "token_rotation_enabled": false
+  },
+  "features": {
+    "bot_user": {
+      "display_name": "GitHub Butler",
+      "always_online": true
+    },
+    "shortcuts": [
+      {
+        "name": "Create GitHub Issue",
+        "type": "message",
+        "callback_id": "create_github_issue",
+        "description": "File a GitHub issue from this message"
+      }
+    ],
+    "slash_commands": [
+      {
+        "command": "/issue",
+        "description": "Create a GitHub issue",
+        "usage_hint": "[title]",
+        "should_escape": false
+      }
+    ]
+  },
+  "oauth_config": {
+    "scopes": {
+      "bot": [
+        "chat:write",
+        "channels:history",
+        "groups:history",
+        "im:history",
+        "mpim:history",
+        "commands",
+        "app_mentions:read"
+      ]
+    }
+  }
+}

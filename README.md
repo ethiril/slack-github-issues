@@ -21,7 +21,7 @@ No public URL required — runs via Slack **Socket Mode** (outbound WebSocket).
 
 1. Go to [api.slack.com/apps](https://api.slack.com/apps) → **Create New App** → **From a manifest**
 2. Pick your workspace
-3. Choose **YAML** and paste the contents of `slack-manifest.yml` from this repo
+3. Choose **JSON** and paste the contents of `slack-manifest.json` from this repo
 4. Click **Create**
 
 This pre-configures Socket Mode, all bot scopes, and the message shortcut automatically.
@@ -224,7 +224,16 @@ Right-click (or long-press) any Slack message → **Create GitHub Issue**. The m
 /issue Fix the login bug
 ```
 
-Opens the same modal with the title pre-filled from the command text. Useful when the issue isn't tied to a specific message.
+Opens the modal with the title pre-filled. Only works at the channel level — Slack does not support slash commands in threads.
+
+### @mention (threads)
+
+```
+@GitHub Butler
+@GitHub Butler Fix the login bug
+```
+
+Since slash commands can't be used in threads, mention the bot instead. It will post an ephemeral prompt visible only to you with a button to open the modal. The thread context is captured automatically so the confirmation posts back in the thread.
 
 ### Defaults
 
