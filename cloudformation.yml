@@ -1,0 +1,158 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Slack GitHub Issues bot — ECS Fargate (Socket Mode, no inbound traffic)
+
+Parameters:
+  SlackBotToken:
+    Type: String
+    NoEcho: true
+    Description: Slack bot token (xoxb-…)
+  SlackAppToken:
+    Type: String
+    NoEcho: true
+    Description: Slack app-level token for Socket Mode (xapp-…)
+  GitHubToken:
+    Type: String
+    NoEcho: true
+    Description: GitHub personal access token
+  GitHubOwner:
+    Type: String
+    Description: GitHub org or username
+  GitHubRepos:
+    Type: String
+    Default: ""
+    Description: Comma-separated repo names (leave blank for all)
+  ImageUri:
+    Type: String
+    Description: ECR image URI (e.g. 123456789.dkr.ecr.us-east-1.amazonaws.com/slack-github-issues:latest)
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC to run in
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Private subnets (need NAT gateway for outbound internet)
+
+Resources:
+  # ── Secrets ────────────────────────────────────────────
+  BotSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: slack-github-issues/slack-bot-token
+      SecretString: !Ref SlackBotToken
+
+  AppSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: slack-github-issues/slack-app-token
+      SecretString: !Ref SlackAppToken
+
+  GitHubSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: slack-github-issues/github-token
+      SecretString: !Ref GitHubToken
+
+  # ── ECS Cluster ────────────────────────────────────────
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: slack-github-issues
+
+  # ── IAM ────────────────────────────────────────────────
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: ReadSecrets
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - !Ref BotSecret
+                  - !Ref AppSecret
+                  - !Ref GitHubSecret
+
+  # ── Log Group ──────────────────────────────────────────
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/slack-github-issues
+      RetentionInDays: 30
+
+  # ── Security Group (outbound only) ─────────────────────
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Slack GitHub Issues — outbound only
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+
+  # ── Task Definition ────────────────────────────────────
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: slack-github-issues
+      Cpu: "256"
+      Memory: "512"
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: app
+          Image: !Ref ImageUri
+          Essential: true
+          Secrets:
+            - Name: SLACK_BOT_TOKEN
+              ValueFrom: !Ref BotSecret
+            - Name: SLACK_APP_TOKEN
+              ValueFrom: !Ref AppSecret
+            - Name: GITHUB_TOKEN
+              ValueFrom: !Ref GitHubSecret
+          Environment:
+            - Name: GITHUB_OWNER
+              Value: !Ref GitHubOwner
+            - Name: GITHUB_REPOS
+              Value: !Ref GitHubRepos
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: app
+
+  # ── Service ────────────────────────────────────────────
+  Service:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref Cluster
+      ServiceName: slack-github-issues
+      TaskDefinition: !Ref TaskDefinition
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets: !Ref SubnetIds
+          SecurityGroups:
+            - !Ref SecurityGroup
+
+Outputs:
+  ClusterName:
+    Value: !Ref Cluster
+  ServiceName:
+    Value: !GetAtt Service.Name

@@ -1,0 +1,15 @@
+{
+  "name": "slack-github-issues",
+  "version": "1.0.0",
+  "description": "Create GitHub issues from Slack message shortcuts with labels, milestones, and projects",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js",
+    "dev": "node --watch app.js"
+  },
+  "dependencies": {
+    "@octokit/rest": "^21.0.0",
+    "@slack/bolt": "^4.1.0",
+    "dotenv": "^16.4.0"
+  }
+}
