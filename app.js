@@ -60,6 +60,9 @@ const github = createGitHubHelpers(octokit, process.env.GITHUB_OWNER);
 
 registerHandlers(app, github);
 
+// Pre-warm the repo cache so the first Slack options request doesn't cold-fetch
+github.warmRepoCache();
+
 if (isSocketMode) {
   (async () => {
     await app.start();

@@ -43,12 +43,17 @@ export function parseIssueTemplate(base64Content, filename) {
 
 // ── GitHub API helpers ────────────────────────────────────────────────────────
 
+const REPO_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
 export function createGitHubHelpers(octokit, githubOwner) {
-  async function getRepos() {
-    if (process.env.GITHUB_REPOS) {
-      return process.env.GITHUB_REPOS.split(",").map((repoName) => repoName.trim());
-    }
-    const repos = await octokit.paginate(octokit.rest.repos.listForOrg, {
+  let repoCacheValue = null;
+  let repoCacheExpiry = 0;
+
+  async function fetchReposFromGitHub() {
+    const timeout = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error("GitHub API timeout")), 8000)
+    );
+    const fetch = octokit.paginate(octokit.rest.repos.listForOrg, {
       org: githubOwner,
       type: "all",
       per_page: 100,
@@ -58,7 +63,31 @@ export function createGitHubHelpers(octokit, githubOwner) {
         per_page: 100,
       })
     );
+    const repos = await Promise.race([fetch, timeout]);
     return repos.map((repo) => repo.name).sort();
+  }
+
+  async function getRepos() {
+    if (process.env.GITHUB_REPOS) {
+      return process.env.GITHUB_REPOS.split(",").map((repoName) => repoName.trim());
+    }
+    if (repoCacheValue && Date.now() < repoCacheExpiry) {
+      return repoCacheValue;
+    }
+    const repos = await fetchReposFromGitHub();
+    repoCacheValue = repos;
+    repoCacheExpiry = Date.now() + REPO_CACHE_TTL_MS;
+    return repos;
+  }
+
+  function warmRepoCache() {
+    fetchReposFromGitHub()
+      .then((repos) => {
+        repoCacheValue = repos;
+        repoCacheExpiry = Date.now() + REPO_CACHE_TTL_MS;
+        console.log(`[github] repo cache warmed: ${repos.length} repos`);
+      })
+      .catch((err) => console.warn("[github] repo cache warm failed:", err.message));
   }
 
   async function getLabels(repoName) {
@@ -292,6 +321,7 @@ export function createGitHubHelpers(octokit, githubOwner) {
 
   return {
     getRepos,
+    warmRepoCache,
     getLabels,
     getMilestones,
     getProjects,
