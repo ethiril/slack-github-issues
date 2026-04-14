@@ -43,7 +43,8 @@ const requiredEnvVars = isSocketMode
 
 const missingEnvVars = requiredEnvVars.filter((name) => !process.env[name]);
 if (missingEnvVars.length > 0) {
-  console.warn(`[warn] Missing required environment variables: ${missingEnvVars.join(", ")}`);
+  console.error(`[error] Missing required environment variables: ${missingEnvVars.join(", ")}`);
+  process.exit(1);
 }
 
 if (isSocketMode) {

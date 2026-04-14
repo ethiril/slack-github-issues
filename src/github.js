@@ -203,6 +203,20 @@ export function createGitHubHelpers(octokit, githubOwner) {
     return response.addProjectV2ItemById.item.id;
   }
 
+  async function setProjectField(projectId, itemId, fieldId, value) {
+    const mutation = `mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $value: ProjectV2FieldValue!) {
+      updateProjectV2ItemFieldValue(input: {
+        projectId: $projectId
+        itemId: $itemId
+        fieldId: $fieldId
+        value: $value
+      }) {
+        projectV2Item { id }
+      }
+    }`;
+    await octokit.graphql(mutation, { projectId, itemId, fieldId, value });
+  }
+
   async function setProjectItemFields(projectId, itemId, projectFieldMap, formValues) {
     const mutation = `mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $value: ProjectV2FieldValue!) {
       updateProjectV2ItemFieldValue(input: {
@@ -303,6 +317,7 @@ export function createGitHubHelpers(octokit, githubOwner) {
     getIssueTemplates,
     createIssue,
     addIssueToProject,
+    setProjectField,
     setProjectItemFields,
     linkParentIssue,
     getIssue,

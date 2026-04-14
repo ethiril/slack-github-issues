@@ -1,6 +1,6 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { compileThread, deriveTitle } from "../src/thread.js";
+import { compileThread, compileThreadWithMeta, deriveTitle } from "../src/thread.js";
 
 describe("compileThread", () => {
   test("returns empty string for empty array", () => {
@@ -70,5 +70,103 @@ describe("deriveTitle", () => {
 
   test("returns fallback when first line is only whitespace", () => {
     assert.equal(deriveTitle("   \nsecond line"), "Issue from Slack");
+  });
+});
+
+// ── compileThreadWithMeta ─────────────────────────────────────────────────────
+
+describe("compileThreadWithMeta", () => {
+  function makeClient(userMap) {
+    const callCount = {};
+    const client = {
+      users: {
+        info: async ({ user }) => {
+          callCount[user] = (callCount[user] ?? 0) + 1;
+          const name = userMap[user];
+          if (!name) throw new Error("user not found");
+          return { user: { profile: { display_name: name } } };
+        },
+      },
+      _callCount: callCount,
+    };
+    return client;
+  }
+
+  test("returns empty string for empty messages array", async () => {
+    const result = await compileThreadWithMeta(makeClient({}), []);
+    assert.equal(result, "");
+  });
+
+  test("returns empty string when all messages are filtered by sinceTs", async () => {
+    const messages = [{ ts: "1000.0", user: "U1", text: "old" }];
+    const result = await compileThreadWithMeta(makeClient({ U1: "Alice" }), messages, { sinceTs: "2000.0" });
+    assert.equal(result, "");
+  });
+
+  test("starts with Full thread header", async () => {
+    const messages = [{ ts: "1000.0", user: "U1", text: "Hello" }];
+    const result = await compileThreadWithMeta(makeClient({ U1: "Alice" }), messages);
+    assert.ok(result.startsWith("**Full thread:**"));
+  });
+
+  test("includes the author's display name", async () => {
+    const messages = [{ ts: "1000.0", user: "U1", text: "Hello" }];
+    const result = await compileThreadWithMeta(makeClient({ U1: "Alice" }), messages);
+    assert.ok(result.includes("@Alice"));
+  });
+
+  test("includes message text as a blockquote", async () => {
+    const messages = [{ ts: "1000.0", user: "U1", text: "Bug found here" }];
+    const result = await compileThreadWithMeta(makeClient({ U1: "Alice" }), messages);
+    assert.ok(result.includes("> Bug found here"));
+  });
+
+  test("wraps multi-line messages entirely in blockquote", async () => {
+    const messages = [{ ts: "1000.0", user: "U1", text: "Line 1\nLine 2" }];
+    const result = await compileThreadWithMeta(makeClient({ U1: "Alice" }), messages);
+    assert.ok(result.includes("> Line 1\n> Line 2"));
+  });
+
+  test("skips messages with empty text", async () => {
+    const messages = [
+      { ts: "1000.0", user: "U1", text: "Hello" },
+      { ts: "1001.0", user: "U1", text: "" },
+      { ts: "1002.0", user: "U1", text: "World" },
+    ];
+    const result = await compileThreadWithMeta(makeClient({ U1: "Alice" }), messages);
+    const quoteLines = result.split("\n").filter((l) => l.startsWith("> "));
+    assert.equal(quoteLines.length, 2);
+  });
+
+  test("caches user lookups — only one API call per user", async () => {
+    const client = makeClient({ U1: "Alice" });
+    const messages = [
+      { ts: "1000.0", user: "U1", text: "First" },
+      { ts: "1001.0", user: "U1", text: "Second" },
+    ];
+    await compileThreadWithMeta(client, messages);
+    assert.equal(client._callCount["U1"], 1);
+  });
+
+  test("only includes messages with ts greater than sinceTs", async () => {
+    const messages = [
+      { ts: "1000.0", user: "U1", text: "Old message" },
+      { ts: "2000.0", user: "U1", text: "New message" },
+    ];
+    const result = await compileThreadWithMeta(makeClient({ U1: "Alice" }), messages, { sinceTs: "1500.0" });
+    assert.ok(!result.includes("Old message"));
+    assert.ok(result.includes("New message"));
+  });
+
+  test("uses userId as fallback when user lookup fails", async () => {
+    const messages = [{ ts: "1000.0", user: "U_UNKNOWN", text: "Hello" }];
+    const result = await compileThreadWithMeta(makeClient({}), messages);
+    assert.ok(result.includes("@U_UNKNOWN"));
+  });
+
+  test("uses Unknown when userId is missing", async () => {
+    const messages = [{ ts: "1000.0", text: "Hello" }];
+    const result = await compileThreadWithMeta(makeClient({}), messages);
+    assert.ok(result.includes("@Unknown"));
   });
 });

@@ -6,66 +6,130 @@ import {
   resolveDefaultProjectId,
   toSlackOption,
 } from "./modal.js";
-import { fetchThreadMessages, compileThread, deriveTitle } from "./thread.js";
+import { fetchThreadMessages, compileThreadWithMeta, deriveTitle } from "./thread.js";
+import { buildIssueCard, buildCardMeta } from "./card.js";
+import { registerThreadIssue, getThreadIssue, updateThreadIssueSyncTs } from "./thread-store.js";
 
-// ── Shared quick-create logic ─────────────────────────────────────────────────
-// Used by both the emoji reaction handler and the Quick Create button handler.
-// Skips the form; uses the user's last-saved defaults. Thread is automatically
-// compiled into the body when the message is part of a thread.
+// GitHub repo names: alphanumeric, hyphen, underscore, dot; cannot start with
+// dot or hyphen; max 100 chars. Validated before making any API call with a
+// user-supplied repo name (e.g., from emoji suffix routing).
+const VALID_REPO_RE = /^[a-zA-Z0-9_][a-zA-Z0-9._-]{0,98}[a-zA-Z0-9._]$|^[a-zA-Z0-9_]$/;
+function isValidRepoName(name) {
+  return typeof name === "string" && VALID_REPO_RE.test(name);
+}
 
-async function quickCreate({ client, github, userId, channelId, threadTs, messageText, permalink }) {
+// Return only the message from an error — never expose stack traces or tokens.
+function safeErrMsg(err) {
+  return err?.message ?? "An unexpected error occurred.";
+}
+
+function summarizeBlocks(blocks) {
+  return blocks.map((block, i) => ({
+    i,
+    type: block.type,
+    block_id: block.block_id ?? null,
+    text_len: typeof block.text?.text === "string" ? block.text.text.length : 0,
+    elements: Array.isArray(block.elements)
+      ? block.elements.map((el) => ({
+          type: el.type,
+          action_id: el.action_id ?? null,
+          options: Array.isArray(el.options) ? el.options.length : 0,
+          initial_options: Array.isArray(el.initial_options) ? el.initial_options.length : 0,
+          value_len: typeof el.value === "string" ? el.value.length : 0,
+          text_len: typeof el.text?.text === "string" ? el.text.text.length : 0,
+          placeholder_len:
+            typeof el.placeholder?.text === "string" ? el.placeholder.text.length : 0,
+        }))
+      : undefined,
+  }));
+}
+
+// ── Issue card helper ─────────────────────────────────────────────────────────
+// Fetches repo metadata and posts an inline issue-creation card as an ephemeral
+// message. Used by emoji reactions and the Quick Create button from @mentions.
+
+async function postIssueCard({ client, github, channelId, threadTs, userId, messageText, permalink, repo }) {
   const defaults = getUserDefaults(userId);
-  if (!defaults.repo) {
-    await client.chat.postEphemeral({
-      channel: channelId,
-      user: userId,
-      ...(threadTs ? { thread_ts: threadTs } : {}),
-      text: "No default repo saved. Use *Create Issue* (form) once to set your preferences.",
-    });
-    return;
-  }
 
+  const [labels, milestones, allProjects] = await Promise.all([
+    github.getLabels(repo),
+    github.getMilestones(repo),
+    github.getProjects(),
+  ]);
+
+  const projectId = resolveDefaultProjectId(allProjects, defaults.projectId, process.env.DEFAULT_GITHUB_PROJECT);
+  const projectFields = projectId
+    ? await github.getProjectFields(projectId).catch(() => [])
+    : [];
+
+  const priorityField = projectFields.find((f) => /priority/i.test(f.name)) ?? null;
+  const statusField = projectFields.find((f) => /status/i.test(f.name)) ?? null;
   const title = deriveTitle(messageText);
 
-  let body = messageText;
-  if (threadTs) {
-    const threadMsgs = await fetchThreadMessages(client, channelId, threadTs);
-    if (threadMsgs.length > 1) {
-      body = compileThread(threadMsgs);
-    }
-  }
-  if (permalink) {
-    body += `\n\n---\n_Created from Slack: ${permalink}_`;
-  }
+  const cardMeta = buildCardMeta({
+    repo,
+    title,
+    messageText,
+    channelId,
+    threadTs,
+    userId,
+    permalink,
+    projectId,
+    priorityField,
+    statusField,
+    defaultLabelValues: defaults.labelValues ?? [],
+    defaultMilestoneValue: defaults.milestoneValue ?? null,
+  });
+
+  const blocks = buildIssueCard({
+    repo,
+    title,
+    labels,
+    milestones,
+    priorityField,
+    statusField,
+    defaultLabelValues: defaults.labelValues ?? [],
+    defaultMilestoneValue: defaults.milestoneValue ?? null,
+    cardMeta,
+  });
+
+  const blockSummary = summarizeBlocks(blocks);
+
+  console.log("[issue-card] repo:", repo);
+  console.log("[issue-card] counts:", {
+    labels: labels.length,
+    milestones: milestones.length,
+    projectFields: projectFields.length,
+    priorityOptions: priorityField?.options?.length ?? 0,
+    statusOptions: statusField?.options?.length ?? 0,
+  });
+
+  console.log("[issue-card] cardMeta lengths:", {
+    json: JSON.stringify(cardMeta).length,
+    title: String(cardMeta.title ?? "").length,
+    messageText: String(cardMeta.messageText ?? "").length,
+    permalink: String(cardMeta.permalink ?? "").length,
+    defaultLabelValues: Array.isArray(cardMeta.defaultLabelValues)
+      ? cardMeta.defaultLabelValues.length
+      : 0,
+  });
+
+  console.log("[issue-card] block summary:", JSON.stringify(blockSummary, null, 2));
+  console.log("[issue-card] full blocks:", JSON.stringify(blocks, null, 2));
 
   try {
-    const createdIssue = await github.createIssue({
-      repo: defaults.repo,
-      title,
-      body,
-      labels: defaults.labelValues,
-      milestone: defaults.milestoneValue ? Number(defaults.milestoneValue) : undefined,
-    });
-
-    if (defaults.projectId) {
-      await github.addIssueToProject(defaults.projectId, createdIssue.node_id)
-        .catch((err) => console.error("Failed to add quick-create issue to project:", err.message));
-    }
-
-    await client.chat.postMessage({
-      channel: channelId,
-      ...(threadTs ? { thread_ts: threadTs } : {}),
-      unfurl_links: false,
-      text: `Issue created: <${createdIssue.html_url}|${defaults.repo}#${createdIssue.number} -- ${title}>`,
-    });
-  } catch (err) {
-    console.error("Quick create failed:", err);
     await client.chat.postEphemeral({
       channel: channelId,
       user: userId,
       ...(threadTs ? { thread_ts: threadTs } : {}),
-      text: `Failed to create issue: ${err.message}`,
+      text: `New issue: ${title}`,
+      blocks,
     });
+  } catch (err) {
+    console.error("[issue-card] Slack rejected blocks:", err?.data ?? err);
+    console.error("[issue-card] rejected block summary:", JSON.stringify(blockSummary, null, 2));
+    console.error("[issue-card] rejected full blocks:", JSON.stringify(blocks, null, 2));
+    throw err;
   }
 }
 
@@ -282,35 +346,77 @@ export function registerHandlers(app, github) {
     });
   });
 
-  // 5. "Quick Create" button from @mention → create issue immediately using saved defaults
-  app.action("quick_create_from_mention", async ({ ack, action, body, client }) => {
+  // 5. "Quick Create" button from @mention → show the issue card
+  app.action("quick_create_from_mention", async ({ ack, action, body, client, respond }) => {
     await ack();
 
     const { issueTitle, ...slackMessageContext } = JSON.parse(action.value);
+    const userId = body.user?.id;
+    const defaults = getUserDefaults(userId);
 
-    await quickCreate({
+    if (!defaults.repo) {
+      await respond({
+        replace_original: true,
+        text: "No default repo saved. Use *Create Issue* (form) once to set your preferences.",
+      });
+      return;
+    }
+
+    await respond({ delete_original: true });
+
+    await postIssueCard({
       client,
       github,
-      userId: body.user?.id,
       channelId: slackMessageContext.channelId,
       threadTs: slackMessageContext.threadTs,
+      userId,
       messageText: issueTitle ?? "",
       permalink: slackMessageContext.permalink,
+      repo: defaults.repo,
+    }).catch(async (err) => {
+      console.error("Failed to post issue card from mention:", err);
+      await client.chat.postEphemeral({
+        channel: slackMessageContext.channelId,
+        user: userId,
+        ...(slackMessageContext.threadTs ? { thread_ts: slackMessageContext.threadTs } : {}),
+        text: `Failed to create issue card: ${safeErrMsg(err)}`,
+      });
     });
   });
 
-  // 6. Emoji reaction → quick-create issue from the reacted-to message
-  // Enabled when QUICK_CREATE_EMOJI is set (e.g. QUICK_CREATE_EMOJI=github_butler).
-  // Uses the reactor's saved defaults. Full thread is automatically included
-  // when the reacted message is part of a thread.
+  // 6. Emoji reaction → show issue card or append to existing thread issue
+  //
+  // Emoji naming convention:
+  //   :github_butler:          → use the reactor's default repo
+  //   :{repo}_github_butler:   → use the named repo (e.g. :frontend_github_butler:)
+  //
+  // Tag update: if the thread already has an associated GitHub issue from a
+  // prior creation, new messages since the last sync are appended as a comment
+  // instead of creating a duplicate issue.
   app.event("reaction_added", async ({ event, client }) => {
-    const configuredEmoji = process.env.QUICK_CREATE_EMOJI;
-    if (!configuredEmoji || event.reaction !== configuredEmoji) return;
+    const BUTLER_SUFFIX = "_github_butler";
+    const reaction = event.reaction;
+
+    let repo = null;
+    if (reaction === "github_butler") {
+      const defaults = getUserDefaults(event.user);
+      repo = defaults.repo ?? null;
+    } else if (reaction.endsWith(BUTLER_SUFFIX)) {
+      const candidate = reaction.slice(0, -BUTLER_SUFFIX.length);
+      if (!isValidRepoName(candidate)) return;
+      repo = candidate;
+    } else {
+      return;
+    }
+
     if (event.item.type !== "message") return;
 
+    const channelId = event.item.channel;
+    const messageTs = event.item.ts;
+
     const historyResult = await client.conversations.history({
-      channel: event.item.channel,
-      latest: event.item.ts,
+      channel: channelId,
+      latest: messageTs,
       inclusive: true,
       limit: 1,
     }).catch(() => null);
@@ -318,19 +424,86 @@ export function registerHandlers(app, github) {
     const message = historyResult?.messages?.[0];
     if (!message) return;
 
+    const threadTs = message.thread_ts ?? message.ts;
+    const userId = event.user;
+
+    // Check for an existing thread → issue mapping (tag update flow)
+    const existingIssue = getThreadIssue(threadTs);
+    if (existingIssue) {
+      const { repo: issueRepo, issueNumber, lastSyncedTs } = existingIssue;
+      const allMessages = await fetchThreadMessages(client, channelId, threadTs);
+      const newContent = await compileThreadWithMeta(client, allMessages, { sinceTs: lastSyncedTs });
+
+      if (!newContent) {
+        await client.chat.postEphemeral({
+          channel: channelId,
+          user: userId,
+          thread_ts: threadTs,
+          text: `No new messages to add to ${issueRepo}#${issueNumber} since last sync.`,
+        });
+        return;
+      }
+
+      const latestTs = allMessages[allMessages.length - 1]?.ts ?? lastSyncedTs;
+
+      try {
+        const comment = await github.addIssueComment(
+          issueRepo,
+          issueNumber,
+          `${newContent}\n\n---\n_Updated from Slack_`
+        );
+        updateThreadIssueSyncTs(threadTs, latestTs);
+        await client.chat.postMessage({
+          channel: channelId,
+          thread_ts: threadTs,
+          unfurl_links: false,
+          text: `Thread update added to <${comment.html_url}|${issueRepo}#${issueNumber}>`,
+        });
+      } catch (err) {
+        console.error("Tag update failed:", err);
+        await client.chat.postEphemeral({
+          channel: channelId,
+          user: userId,
+          thread_ts: threadTs,
+          text: `Failed to update issue: ${safeErrMsg(err)}`,
+        });
+      }
+      return;
+    }
+
+    // No existing issue — show the card for new issue creation
+    if (!repo) {
+      await client.chat.postEphemeral({
+        channel: channelId,
+        user: userId,
+        thread_ts: threadTs,
+        text: "No default repo saved. Use *Create Issue* (form) once to set your preferences, or use a repo-specific emoji like `:frontend_github_butler:`.",
+      });
+      return;
+    }
+
     const permalinkResult = await client.chat.getPermalink({
-      channel: event.item.channel,
-      message_ts: event.item.ts,
+      channel: channelId,
+      message_ts: messageTs,
     }).catch(() => null);
 
-    await quickCreate({
+    await postIssueCard({
       client,
       github,
-      userId: event.user,
-      channelId: event.item.channel,
-      threadTs: message.thread_ts ?? null,
+      channelId,
+      threadTs,
+      userId,
       messageText: message.text ?? "",
       permalink: permalinkResult?.permalink ?? "",
+      repo,
+    }).catch(async (err) => {
+      console.error("Failed to post issue card:", err);
+      await client.chat.postEphemeral({
+        channel: channelId,
+        user: userId,
+        thread_ts: threadTs,
+        text: `Failed to create issue card: ${safeErrMsg(err)}`,
+      });
     });
   });
 
@@ -562,14 +735,15 @@ export function registerHandlers(app, github) {
       : "";
 
     let issueBody = formValues.body_block?.body_input?.value ?? "";
+    let threadMsgs = null;
 
     if (includeThread && slackMessageContext.threadTs) {
-      const threadMsgs = await fetchThreadMessages(
+      threadMsgs = await fetchThreadMessages(
         client,
         slackMessageContext.channelId,
         slackMessageContext.threadTs
       );
-      const threadContent = compileThread(threadMsgs);
+      const threadContent = await compileThreadWithMeta(client, threadMsgs);
       if (threadContent) {
         issueBody = issueBody ? `${issueBody}\n\n${threadContent}` : threadContent;
       }
@@ -604,6 +778,21 @@ export function registerHandlers(app, github) {
         await github.linkParentIssue(selectedRepo, parentIssueInput, createdIssue.node_id);
       }
 
+      // Register thread → issue mapping for future tag updates
+      if (slackMessageContext.threadTs) {
+        if (!threadMsgs) {
+          threadMsgs = await fetchThreadMessages(
+            client,
+            slackMessageContext.channelId,
+            slackMessageContext.threadTs
+          ).catch(() => []);
+        }
+        const latestTs = threadMsgs.length > 0
+          ? threadMsgs[threadMsgs.length - 1].ts
+          : slackMessageContext.threadTs;
+        registerThreadIssue(slackMessageContext.threadTs, selectedRepo, createdIssue.number, latestTs);
+      }
+
       await client.chat.postMessage({
         channel: slackMessageContext.channelId,
         ...(slackMessageContext.threadTs ? { thread_ts: slackMessageContext.threadTs } : {}),
@@ -614,7 +803,7 @@ export function registerHandlers(app, github) {
       console.error("Failed to create issue:", err);
       await client.chat.postMessage({
         channel: slackMessageContext.userId,
-        text: `Failed to create GitHub issue in *${selectedRepo}*: ${err.message}`,
+        text: `Failed to create GitHub issue in *${selectedRepo}*: ${safeErrMsg(err)}`,
       });
     }
   });
@@ -657,7 +846,7 @@ export function registerHandlers(app, github) {
         slackMessageContext.channelId,
         slackMessageContext.threadTs
       );
-      const threadContent = compileThread(threadMsgs);
+      const threadContent = await compileThreadWithMeta(client, threadMsgs);
       if (threadContent) {
         commentBody = commentBody ? `${commentBody}\n\n${threadContent}` : threadContent;
       }
@@ -677,8 +866,181 @@ export function registerHandlers(app, github) {
       console.error("Failed to add comment:", err);
       await client.chat.postMessage({
         channel: slackMessageContext.userId,
-        text: `Failed to add comment to *${selectedRepo}#${issueNumber}*: ${err.message}`,
+        text: `Failed to add comment to *${selectedRepo}#${issueNumber}*: ${safeErrMsg(err)}`,
       });
     }
+  });
+
+  // 14. Card "Create Issue" button → create issue from card state + cardMeta defaults
+  app.action("issue_card_create", async ({ ack, action, body, client, respond }) => {
+    await ack();
+
+    const cardMeta = JSON.parse(action.value);
+    const stateValues = body.state?.values ?? {};
+
+    // Read selections from card state; fall back to cardMeta defaults for
+    // elements the user did not interact with (Slack only tracks changed state
+    // in actions blocks, unlike modal input blocks).
+    // Dropdown values are GitHub option IDs — use them directly as singleSelectOptionId.
+    const priorityOptionId =
+      stateValues.card_priority?.card_priority_select?.selected_option?.value ??
+      stateValues.card_selections?.card_priority_select?.selected_option?.value ??
+      cardMeta.defaultPriorityOptionId;
+
+    const statusOptionId =
+      stateValues.card_status?.card_status_select?.selected_option?.value ??
+      stateValues.card_selections?.card_status_select?.selected_option?.value ??
+      cardMeta.defaultStatusOptionId;
+
+    const selectedLabelValues =
+      stateValues.card_labels?.card_labels_select?.selected_options?.map((o) => o.value) ??
+      stateValues.card_selections?.card_labels_select?.selected_options?.map((o) => o.value) ??
+      cardMeta.defaultLabelValues ??
+      [];
+
+    const milestoneValue =
+      stateValues.card_milestone?.card_milestone_select?.selected_option?.value ??
+      cardMeta.defaultMilestoneValue ??
+      null;
+
+    // Compile thread for the issue body
+    let issueBody = cardMeta.messageText || "";
+    if (cardMeta.threadTs) {
+      const threadMsgs = await fetchThreadMessages(client, cardMeta.channelId, cardMeta.threadTs);
+      if (threadMsgs.length > 1) {
+        const threadContent = await compileThreadWithMeta(client, threadMsgs);
+        if (threadContent) issueBody = threadContent;
+      }
+    }
+    if (cardMeta.permalink) {
+      issueBody += `\n\n---\n_Created from Slack: ${cardMeta.permalink}_`;
+    }
+
+    try {
+      const createdIssue = await github.createIssue({
+        repo: cardMeta.repo,
+        title: cardMeta.title,
+        body: issueBody,
+        labels: selectedLabelValues.length > 0 ? selectedLabelValues : undefined,
+        milestone: milestoneValue && milestoneValue !== "" && milestoneValue !== "__none__" ? Number(milestoneValue) : undefined,
+      });
+
+      if (cardMeta.projectId) {
+        const projectItemId = await github.addIssueToProject(cardMeta.projectId, createdIssue.node_id)
+          .catch((err) => { console.error("Failed to add card issue to project:", err.message); return null; });
+
+        if (projectItemId) {
+          const fieldUpdates = [];
+          if (cardMeta.priorityFieldId && priorityOptionId) {
+            fieldUpdates.push(
+              github.setProjectField(
+                cardMeta.projectId,
+                projectItemId,
+                cardMeta.priorityFieldId,
+                { singleSelectOptionId: priorityOptionId }
+              ).catch((err) => console.error("Failed to set priority:", err.message))
+            );
+          }
+          if (cardMeta.statusFieldId && statusOptionId) {
+            fieldUpdates.push(
+              github.setProjectField(
+                cardMeta.projectId,
+                projectItemId,
+                cardMeta.statusFieldId,
+                { singleSelectOptionId: statusOptionId }
+              ).catch((err) => console.error("Failed to set status:", err.message))
+            );
+          }
+          await Promise.all(fieldUpdates);
+        }
+      }
+
+      // Register thread → issue mapping for future tag updates
+      if (cardMeta.threadTs) {
+        const allMsgs = await fetchThreadMessages(client, cardMeta.channelId, cardMeta.threadTs).catch(() => []);
+        const latestTs = allMsgs.length > 0 ? allMsgs[allMsgs.length - 1].ts : cardMeta.threadTs;
+        registerThreadIssue(cardMeta.threadTs, cardMeta.repo, createdIssue.number, latestTs);
+      }
+
+      await respond({ delete_original: true });
+      await client.chat.postMessage({
+        channel: cardMeta.channelId,
+        ...(cardMeta.threadTs ? { thread_ts: cardMeta.threadTs } : {}),
+        unfurl_links: false,
+        text: `Issue created: <${createdIssue.html_url}|${cardMeta.repo}#${createdIssue.number} -- ${cardMeta.title}>`,
+      });
+    } catch (err) {
+      console.error("Card issue creation failed:", err);
+      await respond({
+        replace_original: true,
+        text: `Failed to create issue: ${safeErrMsg(err)}`,
+      });
+    }
+  });
+
+  // 15. Card "Customize" button → open the full form modal pre-filled from card state
+  app.action("issue_card_customize", async ({ ack, action, body, client, respond }) => {
+    await ack();
+
+    const cardMeta = JSON.parse(action.value);
+    const stateValues = body.state?.values ?? {};
+
+    const currentLabelValues =
+      stateValues.card_labels?.card_labels_select?.selected_options?.map((o) => o.value) ??
+      stateValues.card_selections?.card_labels_select?.selected_options?.map((o) => o.value) ??
+      cardMeta.defaultLabelValues ?? [];
+
+    const currentMilestoneValue =
+      stateValues.card_milestone?.card_milestone_select?.selected_option?.value ??
+      cardMeta.defaultMilestoneValue ?? null;
+
+    const [labels, milestones, projects, projectFields] = await Promise.all([
+      github.getLabels(cardMeta.repo),
+      github.getMilestones(cardMeta.repo),
+      github.getProjects(),
+      cardMeta.projectId ? github.getProjectFields(cardMeta.projectId).catch(() => []) : Promise.resolve([]),
+    ]);
+
+    const slackMessageContext = {
+      channelId: cardMeta.channelId,
+      threadTs: cardMeta.threadTs,
+      userId: cardMeta.userId,
+      permalink: cardMeta.permalink,
+      projectFieldMap: buildProjectFieldMap(projectFields),
+    };
+
+    // Open the modal before deleting the card (trigger_id has a 3s window)
+    await client.views.open({
+      trigger_id: body.trigger_id,
+      view: buildModal({
+        selectedRepo: cardMeta.repo,
+        metadata: slackMessageContext,
+        currentTitle: cardMeta.title,
+        currentBody: cardMeta.messageText,
+        labels,
+        milestones,
+        projects,
+        projectFields,
+        initialProjectId: cardMeta.projectId,
+        initialLabelValues: currentLabelValues,
+        initialMilestoneValue: currentMilestoneValue,
+      }),
+    });
+
+    await respond({ delete_original: true });
+  });
+
+  // 16. Card "Cancel" button → dismiss the card
+  app.action("issue_card_cancel", async ({ ack, respond }) => {
+    await ack();
+    await respond({ delete_original: true });
+  });
+
+  // 17. No-op handler for card dropdown interactions
+  // The card uses actions blocks (not modal input blocks), so Slack fires an
+  // action event on every dropdown change. We ack immediately and let state
+  // accumulate in body.state.values for when the Create button is pressed.
+  app.action(/^card_/, async ({ ack }) => {
+    await ack();
   });
 }
