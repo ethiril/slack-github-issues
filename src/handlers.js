@@ -44,6 +44,58 @@ function summarizeBlocks(blocks) {
   }));
 }
 
+function collectModalProjectFieldValues(stateValues = {}) {
+  const out = {};
+
+  for (const [blockId, blockState] of Object.entries(stateValues)) {
+    if (!/^pf_\d+$/.test(blockId)) continue;
+
+    const input = blockState?.[`${blockId}_input`];
+    if (!input) continue;
+
+    if (input.selected_option?.value != null) {
+      out[blockId] = input.selected_option.value;
+    } else if (input.value != null && input.value !== "") {
+      out[blockId] = input.value;
+    }
+  }
+
+  return out;
+}
+
+function collectCardProjectFieldValues(projectFields = [], stateValues = {}, cardMeta = {}) {
+  const out = {};
+
+  projectFields.forEach((field, index) => {
+    const blockId = `pf_${index}`;
+    const name = field.name.toLowerCase();
+
+    if (field.dataType === "SINGLE_SELECT") {
+      if (name === "priority") {
+        out[blockId] =
+          stateValues.card_priority?.card_priority_select?.selected_option?.value ??
+          stateValues.card_selections?.card_priority_select?.selected_option?.value ??
+          cardMeta.defaultPriorityOptionId ??
+          null;
+      } else if (name === "status") {
+        out[blockId] =
+          stateValues.card_status?.card_status_select?.selected_option?.value ??
+          stateValues.card_selections?.card_status_select?.selected_option?.value ??
+          cardMeta.defaultStatusOptionId ??
+          null;
+      } else if (name === "type") {
+        out[blockId] =
+          stateValues.card_type?.card_type_select?.selected_option?.value ??
+          stateValues.card_selections?.card_type_select?.selected_option?.value ??
+          cardMeta.defaultTypeOptionId ??
+          null;
+      }
+    }
+  });
+
+  return Object.fromEntries(Object.entries(out).filter(([, v]) => v != null));
+}
+
 // ── Issue card helper ─────────────────────────────────────────────────────────
 // Fetches repo metadata and posts an inline issue-creation card as an ephemeral
 // message. Used by emoji reactions and the Quick Create button from @mentions.
@@ -65,6 +117,7 @@ async function postIssueCard({ client, github, channelId, threadTs, userId, mess
   const priorityField = projectFields.find((f) => /priority/i.test(f.name)) ?? null;
   const statusField = projectFields.find((f) => /status/i.test(f.name)) ?? null;
   const typeField = projectFields.find((f) => /^type$/i.test(f.name)) ?? null;
+  const title = deriveTitle(messageText);
 
   const cardMeta = buildCardMeta({
     repo,
@@ -102,6 +155,7 @@ async function postIssueCard({ client, github, channelId, threadTs, userId, mess
     labels: labels.length,
     milestones: milestones.length,
     projectFields: projectFields.length,
+    typeOptions: typeField?.options?.length ?? 0,
     priorityOptions: priorityField?.options?.length ?? 0,
     statusOptions: statusField?.options?.length ?? 0,
   });
@@ -532,6 +586,7 @@ export function registerHandlers(app, github) {
     const slackMessageContext = JSON.parse(modalView.private_metadata);
     const currentTitle = modalView.state.values.title_block?.title_input?.value ?? "";
     const currentBody = modalView.state.values.body_block?.body_input?.value ?? "";
+    const currentProjectFieldValues = collectModalProjectFieldValues(modalView.state.values);
     const defaults = getUserDefaults(body.user?.id);
 
     const [labels, milestones, projects, templates] = await Promise.all([
@@ -574,6 +629,7 @@ export function registerHandlers(app, github) {
         initialProjectId,
         initialMilestoneValue,
         initialLabelValues,
+        initialProjectFieldValues: currentProjectFieldValues,
       }),
     });
   });
@@ -590,6 +646,7 @@ export function registerHandlers(app, github) {
 
     const defaults = getUserDefaults(body.user?.id);
     const currentProjectId = modalView.state.values.project_block?.project_select?.selected_option?.value ?? null;
+    const currentProjectFieldValues = collectModalProjectFieldValues(modalView.state.values);
 
     const [labels, milestones, projects, templates, projectFields] = await Promise.all([
       github.getLabels(selectedRepo),
@@ -631,6 +688,7 @@ export function registerHandlers(app, github) {
         initialProjectId: resolvedProjectId,
         initialMilestoneValue,
         initialLabelValues,
+        initialProjectFieldValues: currentProjectFieldValues,
       }),
     });
   });
@@ -650,6 +708,7 @@ export function registerHandlers(app, github) {
     const currentBody = modalView.state.values.body_block?.body_input?.value ?? "";
     const currentLabelValues = modalView.state.values.labels_block?.labels_select?.selected_options?.map((o) => o.value) ?? [];
     const currentMilestoneValue = modalView.state.values.milestone_block?.milestone_select?.selected_option?.value ?? null;
+    const currentProjectFieldValues = collectModalProjectFieldValues(modalView.state.values);
 
     const [labels, milestones, projects, templates, projectFields] = await Promise.all([
       github.getLabels(selectedRepo),
@@ -676,6 +735,7 @@ export function registerHandlers(app, github) {
         initialProjectId: selectedProjectId,
         initialMilestoneValue: currentMilestoneValue,
         initialLabelValues: currentLabelValues,
+        initialProjectFieldValues: currentProjectFieldValues,
       }),
     });
   });
@@ -880,10 +940,6 @@ export function registerHandlers(app, github) {
     const cardMeta = JSON.parse(action.value);
     const stateValues = body.state?.values ?? {};
 
-    // Read selections from card state; fall back to cardMeta defaults for
-    // elements the user did not interact with (Slack only tracks changed state
-    // in actions blocks, unlike modal input blocks).
-    // Dropdown values are GitHub option IDs — use them directly as singleSelectOptionId.
     const typeOptionId =
       stateValues.card_type?.card_type_select?.selected_option?.value ??
       stateValues.card_selections?.card_type_select?.selected_option?.value ??
@@ -938,16 +994,7 @@ export function registerHandlers(app, github) {
 
         if (projectItemId) {
           const fieldUpdates = [];
-          if (cardMeta.priorityFieldId && priorityOptionId) {
-            fieldUpdates.push(
-              github.setProjectField(
-                cardMeta.projectId,
-                projectItemId,
-                cardMeta.priorityFieldId,
-                { singleSelectOptionId: priorityOptionId }
-              ).catch((err) => console.error("Failed to set priority:", err.message))
-            );
-          }
+
           if (cardMeta.typeFieldId && typeOptionId) {
             fieldUpdates.push(
               github.setProjectField(
@@ -956,6 +1003,17 @@ export function registerHandlers(app, github) {
                 cardMeta.typeFieldId,
                 { singleSelectOptionId: typeOptionId }
               ).catch((err) => console.error("Failed to set type:", err.message))
+            );
+          }
+
+          if (cardMeta.priorityFieldId && priorityOptionId) {
+            fieldUpdates.push(
+              github.setProjectField(
+                cardMeta.projectId,
+                projectItemId,
+                cardMeta.priorityFieldId,
+                { singleSelectOptionId: priorityOptionId }
+              ).catch((err) => console.error("Failed to set priority:", err.message))
             );
           }
 
@@ -969,6 +1027,7 @@ export function registerHandlers(app, github) {
               ).catch((err) => console.error("Failed to set status:", err.message))
             );
           }
+
           await Promise.all(fieldUpdates);
         }
       }
@@ -1019,6 +1078,8 @@ export function registerHandlers(app, github) {
       cardMeta.projectId ? github.getProjectFields(cardMeta.projectId).catch(() => []) : Promise.resolve([]),
     ]);
 
+    const initialProjectFieldValues = collectCardProjectFieldValues(projectFields, stateValues, cardMeta);
+
     const slackMessageContext = {
       channelId: cardMeta.channelId,
       threadTs: cardMeta.threadTs,
@@ -1027,7 +1088,6 @@ export function registerHandlers(app, github) {
       projectFieldMap: buildProjectFieldMap(projectFields),
     };
 
-    // Open the modal before deleting the card (trigger_id has a 3s window)
     await client.views.open({
       trigger_id: body.trigger_id,
       view: buildModal({
@@ -1042,6 +1102,7 @@ export function registerHandlers(app, github) {
         initialProjectId: cardMeta.projectId,
         initialLabelValues: currentLabelValues,
         initialMilestoneValue: currentMilestoneValue,
+        initialProjectFieldValues,
       }),
     });
 
@@ -1055,7 +1116,7 @@ export function registerHandlers(app, github) {
   });
 
   // 17. No-op handler for card dropdown interactions
-  // The card uses actions blocks (not modal input blocks), so Slack fires an
+  // The card uses actions blocks/section accessories, so Slack fires an
   // action event on every dropdown change. We ack immediately and let state
   // accumulate in body.state.values for when the Create button is pressed.
   app.action(/^card_/, async ({ ack }) => {
