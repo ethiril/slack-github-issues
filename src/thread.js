@@ -16,56 +16,44 @@ export function compileThread(messages) {
   return "**Full thread:**\n\n" + lines.join("\n>\n");
 }
 
-// Formats a Slack ts (Unix float string) as "Apr 14 at 3:45 PM" (server local time)
-function formatTs(ts) {
-  const d = new Date(parseFloat(ts) * 1000);
+function formatSlackTimestamp(slackTs) {
+  const date = new Date(parseFloat(slackTs) * 1000);
   const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
-  const h = d.getHours();
-  const ampm = h >= 12 ? "PM" : "AM";
-  const h12 = h % 12 || 12;
-  return `${months[d.getMonth()]} ${d.getDate()} at ${h12}:${String(d.getMinutes()).padStart(2, "0")} ${ampm}`;
+  const hours = date.getHours();
+  const ampm = hours >= 12 ? "PM" : "AM";
+  const hours12 = hours % 12 || 12;
+  return `${months[date.getMonth()]} ${date.getDate()} at ${hours12}:${String(date.getMinutes()).padStart(2, "0")} ${ampm}`;
 }
 
-function inlineDisplayName(msg) {
-  return (
-    msg?.user_profile?.display_name ||
-    msg?.user_profile?.display_name_normalized ||
-    msg?.user_profile?.real_name ||
-    msg?.profile?.display_name ||
-    msg?.profile?.display_name_normalized ||
-    msg?.profile?.real_name ||
-    msg?.bot_profile?.name ||
-    msg?.username ||
-    null
-  );
-}
+async function resolveMessageDisplayName(client, userCache, message) {
+  const embeddedDisplayName =
+    message?.user_profile?.display_name ||
+    message?.user_profile?.display_name_normalized ||
+    message?.user_profile?.real_name ||
+    message?.profile?.display_name ||
+    message?.profile?.display_name_normalized ||
+    message?.profile?.real_name ||
+    message?.bot_profile?.name ||
+    message?.username ||
+    null;
 
-function bestUserName(user, fallbackUserId) {
-  return (
-    user?.profile?.display_name ||
-    user?.profile?.display_name_normalized ||
-    user?.profile?.real_name ||
-    user?.real_name ||
-    user?.name ||
-    fallbackUserId
-  );
-}
+  if (embeddedDisplayName) return embeddedDisplayName;
 
-// Resolves the display name for a single message. Caches users.info API calls
-// so concurrent lookups for the same user share a single in-flight request.
-async function resolveMessageDisplayName(client, userCache, msg) {
-  const inlineName = inlineDisplayName(msg);
-  if (inlineName) return inlineName;
-
-  const userId = msg?.user;
+  const userId = message?.user;
   if (!userId) return "Unknown";
   if (userCache.has(userId)) return userCache.get(userId);
 
-  const promise = client.users.info({ user: userId })
+  const displayNamePromise = client.users.info({ user: userId })
     .then((result) => {
-      const resolved = bestUserName(result?.user, userId);
-      console.log("[thread] resolved Slack user", { userId, resolved });
-      return resolved;
+      const displayName =
+        result?.user?.profile?.display_name ||
+        result?.user?.profile?.display_name_normalized ||
+        result?.user?.profile?.real_name ||
+        result?.user?.real_name ||
+        result?.user?.name ||
+        userId;
+      console.log("[thread] resolved Slack user", { userId, resolved: displayName });
+      return displayName;
     })
     .catch((err) => {
       console.warn("[thread] users.info failed", {
@@ -75,16 +63,11 @@ async function resolveMessageDisplayName(client, userCache, msg) {
       return userId;
     });
 
-  userCache.set(userId, promise);
-  return promise;
+  userCache.set(userId, displayNamePromise);
+  return displayNamePromise;
 }
 
-// Decodes Slack's mrkdwn special sequences to readable plain text / Markdown.
-// Resolves <@U123> user mentions via the shared userCache (avoids duplicate API calls).
 async function decodeSlackText(text, userCache, client) {
-  // Resolve all user mentions to actual display name strings up front.
-  // resolveMessageDisplayName returns a (possibly cached) promise — we await it
-  // here so the .replace() below works synchronously with plain strings.
   const names = new Map();
   for (const [, userId, inlineName] of text.matchAll(/<@(U[A-Z0-9]+)(?:\|([^>]*))?>/g)) {
     if (inlineName) {
@@ -95,63 +78,54 @@ async function decodeSlackText(text, userCache, client) {
   }
 
   return text
-    // User mentions: <@U123|name> → @name, <@U123> → @resolved-name
     .replace(/<@(U[A-Z0-9]+)(?:\|([^>]*))?>/g, (_, userId, inlineName) =>
       `@${inlineName ?? names.get(userId) ?? userId}`
     )
-    // Channel mentions: <#C123|name> → #name
     .replace(/<#[A-Z0-9]+\|([^>]+)>/g, "#$1")
-    // Special broadcasts
     .replace(/<!here>/g, "@here")
     .replace(/<!channel>/g, "@channel")
     .replace(/<!everyone>/g, "@everyone")
-    // Links with display text: <https://x.com|label> → label
     .replace(/<https?:\/\/[^|>]+\|([^>]+)>/g, "$1")
-    // Plain links: <https://x.com> → https://x.com
     .replace(/<(https?:\/\/[^>]+)>/g, "$1");
 }
 
-// Enriches each message with the author's display name, timestamp, decoded text,
-// and links to any image attachments.
-//
 // Options:
 //   sinceTs — only include messages newer than this Slack ts (tag update flow)
 export async function compileThreadWithMeta(client, messages, { sinceTs } = {}) {
-  const filtered = sinceTs
-    ? messages.filter((msg) => parseFloat(msg.ts) > parseFloat(sinceTs))
+  const filteredMessages = sinceTs
+    ? messages.filter((message) => parseFloat(message.ts) > parseFloat(sinceTs))
     : messages;
 
-  if (filtered.length === 0) return "";
+  if (filteredMessages.length === 0) return "";
 
   const userCache = new Map();
 
   const parts = await Promise.all(
-    filtered.map(async (msg) => {
-      // file_share messages carry the filename as msg.text — suppress it since
+    filteredMessages.map(async (message) => {
+      // file_share messages carry the filename as message.text — suppress it since
       // we render the actual file as a link below.
-      const rawText = msg.subtype === "file_share" ? "" : (msg.text ?? "").trim();
+      const rawText = message.subtype === "file_share" ? "" : (message.text ?? "").trim();
       const text = rawText ? await decodeSlackText(rawText, userCache, client) : "";
 
-      // Slack stores file attachments in msg.files (plural, newer) or msg.file
+      // Slack stores file attachments in message.files (plural, newer) or message.file
       // (singular, older / file_share subtype). Normalise to a single array.
       const allFiles = [
-        ...(Array.isArray(msg.files) ? msg.files : []),
-        ...(msg.file ? [msg.file] : []),
+        ...(Array.isArray(message.files) ? message.files : []),
+        ...(message.file ? [message.file] : []),
       ];
 
-      // Link to image attachments via their Slack permalink
-      const imageLines = allFiles
+      const imageLinks = allFiles
         .filter((file) => file.mimetype?.startsWith("image/"))
         .map((file) => `[${file.name ?? "image"}](${file.permalink ?? ""})`);
 
-      if (!text && imageLines.length === 0) return null;
+      if (!text && imageLinks.length === 0) return null;
 
-      const author = await resolveMessageDisplayName(client, userCache, msg);
-      const timestamp = formatTs(msg.ts);
+      const author = await resolveMessageDisplayName(client, userCache, message);
+      const timestamp = formatSlackTimestamp(message.ts);
 
       const quotedLines = [];
       if (text) quotedLines.push(`> ${text.replace(/\n/g, "\n> ")}`);
-      imageLines.forEach((img) => quotedLines.push(`> ${img}`));
+      imageLinks.forEach((imageLink) => quotedLines.push(`> ${imageLink}`));
 
       return `**${author}** · ${timestamp}\n${quotedLines.join("\n")}`;
     })

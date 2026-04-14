@@ -98,23 +98,16 @@ export function createGitHubHelpers(octokit, githubOwner) {
         }
       }
     }`;
-    try {
-      const response = await octokit.graphql(orgQuery, { owner: githubOwner });
-      return response.organization.projectsV2.nodes.map((project) => ({
-        text: project.title,
-        value: project.id,
-      }));
-    } catch {
-      try {
-        const response = await octokit.graphql(userQuery, { owner: githubOwner });
-        return response.user.projectsV2.nodes.map((project) => ({
-          text: project.title,
-          value: project.id,
-        }));
-      } catch {
-        return [];
-      }
+
+    const toProjectOption = (project) => ({ text: project.title, value: project.id });
+
+    const orgResult = await octokit.graphql(orgQuery, { owner: githubOwner }).catch(() => null);
+    if (orgResult) {
+      return orgResult.organization.projectsV2.nodes.map(toProjectOption);
     }
+
+    const userResult = await octokit.graphql(userQuery, { owner: githubOwner }).catch(() => null);
+    return (userResult?.user?.projectsV2?.nodes ?? []).map(toProjectOption);
   }
 
   async function getProjectFields(projectId) {
