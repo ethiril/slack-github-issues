@@ -477,6 +477,15 @@ export function registerHandlers(app, github) {
         return;
       }
 
+      // Cross-instance dedup: claim the card post in DynamoDB / in-memory.
+      // Prevents duplicate cards when a Lambda retry lands on a different
+      // instance (in-process isDuplicate above only catches same-instance retries).
+      const claimed = await claimCardPost(threadTs).catch(() => true); // on error, proceed
+      if (!claimed) {
+        console.log("[mention/caret] card already claimed for thread, skipping", { threadTs });
+        return;
+      }
+
       const permalinkResult = await client.chat.getPermalink({
         channel: event.channel,
         message_ts: prevMessage.ts,
@@ -493,6 +502,8 @@ export function registerHandlers(app, github) {
         repo,
       }).catch(async (err) => {
         console.error("Failed to post issue card from caret mention:", err);
+        // Release the claim on failure so the user can try again
+        await releaseCardPost(threadTs).catch(() => {});
         await client.chat.postEphemeral({
           channel: event.channel,
           user: userId,
@@ -1127,15 +1138,11 @@ export function registerHandlers(app, github) {
       ?? cardMeta.defaultMilestoneValue
       ?? null;
 
-    // Compile thread for the issue body
+    // Issue body is just the single target message. Thread context is opt-in
+    // via a subsequent tag update (butler emoji reaction or @mention with ^).
+    // Auto-pulling the thread here would include messages posted after the
+    // user's request and the bot's own card messages, producing spam.
     let issueBody = cardMeta.messageText || "";
-    if (cardMeta.threadTs) {
-      const threadMessages = await fetchThreadMessages(client, cardMeta.channelId, cardMeta.threadTs);
-      if (threadMessages.length > 1) {
-        const threadContent = await compileThreadWithMeta(client, threadMessages);
-        if (threadContent) issueBody = threadContent;
-      }
-    }
     if (cardMeta.permalink) {
       issueBody += `\n\n---\n_Created from Slack: ${cardMeta.permalink}_`;
     }

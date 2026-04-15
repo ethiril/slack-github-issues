@@ -92,9 +92,14 @@ async function decodeSlackText(text, userCache, client) {
 // Options:
 //   sinceTs — only include messages newer than this Slack ts (tag update flow)
 export async function compileThreadWithMeta(client, messages, { sinceTs } = {}) {
+  // Exclude bot messages (including butler's own confirmations). Otherwise a
+  // second tag update run picks up the first run's "Thread update added to…"
+  // post and files it as a new comment containing only that bot message.
+  const nonBotMessages = messages.filter((message) => !message.bot_id);
+
   const filteredMessages = sinceTs
-    ? messages.filter((message) => parseFloat(message.ts) > parseFloat(sinceTs))
-    : messages;
+    ? nonBotMessages.filter((message) => parseFloat(message.ts) > parseFloat(sinceTs))
+    : nonBotMessages;
 
   if (filteredMessages.length === 0) return "";
 
