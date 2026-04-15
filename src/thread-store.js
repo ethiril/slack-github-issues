@@ -123,7 +123,11 @@ export async function getThreadIssue(threadTs) {
     TableName: TABLE,
     Key: { threadTs },
   }));
-  return result.Item ?? null;
+  const item = result.Item;
+  // Ignore pending card claims — only return entries for actually-created issues.
+  // claimCardPost shares this table/key and writes {threadTs, status: "card_pending"}.
+  if (!item || item.status === "card_pending" || item.issueNumber == null) return null;
+  return item;
 }
 
 export async function updateThreadIssueSyncTs(threadTs, lastSyncedTs) {

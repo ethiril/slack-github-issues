@@ -158,6 +158,7 @@ function buildCardSingleSelectBlock(cardField) {
   if (cappedOptions.length === 0) return null;
 
   const defaultOption = cappedOptions.find((option) => option.id === cardField.defaultOptionId);
+  const placeholderText = defaultOption ? cardField.label : `${cardField.label} (optional)`;
 
   return {
     type: "section",
@@ -166,7 +167,7 @@ function buildCardSingleSelectBlock(cardField) {
     accessory: {
       type: "static_select",
       action_id: cardFieldActionId(cardField.key),
-      placeholder: { type: "plain_text", text: cardField.label },
+      placeholder: { type: "plain_text", text: placeholderText },
       options: cappedOptions.map((option) => toSlackOption(option.name, option.id)),
       ...(defaultOption ? { initial_option: toSlackOption(defaultOption.name, defaultOption.id) } : {}),
     },
