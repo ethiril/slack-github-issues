@@ -44,43 +44,45 @@ export function parseIssueTemplate(base64Content, filename) {
 // ── GitHub API helpers ────────────────────────────────────────────────────────
 
 export function createGitHubHelpers(octokit, githubOwner) {
-  async function getRepos() {
-    const envRepos = (process.env.GITHUB_REPOS ?? "").split(",").map((r) => r.trim()).filter(Boolean);
-    if (envRepos.length > 0) {
-      console.log(`[getRepos] using GITHUB_REPOS env: ${envRepos.join(", ")}`);
-      return envRepos;
-    }
+async function getRepos() {
+  const envRepos = (process.env.GITHUB_REPOS ?? "")
+    .split(",")
+    .map((r) => r.trim())
+    .filter(Boolean);
 
-    // GITHUB_REPOS not set — discover repos via the GitHub API
-    console.log(`[getRepos] GITHUB_REPOS not set, fetching from GitHub API for owner=${githubOwner}`);
-    try {
-      try {
-        const orgRepos = await octokit.paginate(octokit.rest.repos.listForOrg, {
-          org: githubOwner,
-          per_page: 100,
-          sort: "updated",
-        });
-        return orgRepos.map((r) => r.name);
-      } catch (err) {
-        console.error("[getRepos] org fetch failed:", err.message);
-      }
-      const names = orgRepos.map((r) => r.name);
-      console.log(`[getRepos] org repos found: ${names.join(", ") || "(none)"}`);
-      return names;
-    } catch {
-      const userRepos = await octokit.paginate(octokit.rest.repos.listForUser, {
-        username: githubOwner,
-        per_page: 100,
-        sort: "updated",
-      }).catch((err) => {
-        console.error(`[getRepos] user repos fetch also failed: ${err.message}`);
-        return [];
-      });
-      const names = userRepos.map((r) => r.name);
-      console.log(`[getRepos] user repos found: ${names.join(", ") || "(none)"}`);
-      return names;
-    }
+  if (envRepos.length > 0) {
+    console.log(`[getRepos] using GITHUB_REPOS env: ${envRepos.join(", ")}`);
+    return envRepos;
   }
+
+  console.log(`[getRepos] GITHUB_REPOS not set, fetching from GitHub API for owner=${githubOwner}`);
+
+  try {
+    const orgRepos = await octokit.paginate(octokit.rest.repos.listForOrg, {
+      org: githubOwner,
+      per_page: 100,
+      sort: "updated",
+    });
+    const names = orgRepos.map((r) => r.name);
+    console.log(`[getRepos] org repos found: ${names.join(", ") || "(none)"}`);
+    return names;
+  } catch (err) {
+    console.error(`[getRepos] org fetch failed: ${err.message}`);
+  }
+
+  const userRepos = await octokit.paginate(octokit.rest.repos.listForUser, {
+    username: githubOwner,
+    per_page: 100,
+    sort: "updated",
+  }).catch((err) => {
+    console.error(`[getRepos] user repos fetch also failed: ${err.message}`);
+    return [];
+  });
+
+  const names = userRepos.map((r) => r.name);
+  console.log(`[getRepos] user repos found: ${names.join(", ") || "(none)"}`);
+  return names;
+}
 
   async function getLabels(repoName) {
     const labels = await octokit.paginate(octokit.rest.issues.listLabelsForRepo, {

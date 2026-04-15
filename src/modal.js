@@ -42,6 +42,8 @@ export function buildModal({
   initialMilestoneValue = null,
   initialProjectId = null,
   initialTemplateId = null,
+  initialProjectFieldValues = {},
+  repoOptions = [],
 }) {
   const blocks = [
     {
@@ -50,10 +52,10 @@ export function buildModal({
       dispatch_action: true,
       label: { type: "plain_text", text: "Repository" },
       element: {
-        type: "external_select",
+        type: "static_select",
         action_id: "repo_select",
-        min_query_length: 0,
         placeholder: { type: "plain_text", text: "Pick a repo…" },
+        options: repoOptions.map((repo) => toSlackOption(repo, repo)),
         ...(selectedRepo ? { initial_option: toSlackOption(selectedRepo, selectedRepo) } : {}),
       },
     },
@@ -72,7 +74,9 @@ export function buildModal({
         action_id: "template_select",
         placeholder: { type: "plain_text", text: "Select a template…" },
         options: templates.map((t) => toSlackOption(t.name, t.name)),
-        ...(preSelectedTemplate ? { initial_option: toSlackOption(preSelectedTemplate.name, preSelectedTemplate.name) } : {}),
+        ...(preSelectedTemplate
+          ? { initial_option: toSlackOption(preSelectedTemplate.name, preSelectedTemplate.name) }
+          : {}),
       },
     });
   }
@@ -157,7 +161,9 @@ export function buildModal({
         action_id: "milestone_select",
         placeholder: { type: "plain_text", text: "Select milestone…" },
         options: milestones.map((m) => toSlackOption(m.text, m.value)),
-        ...(preSelectedMilestone ? { initial_option: toSlackOption(preSelectedMilestone.text, preSelectedMilestone.value) } : {}),
+        ...(preSelectedMilestone
+          ? { initial_option: toSlackOption(preSelectedMilestone.text, preSelectedMilestone.value) }
+          : {}),
       },
     });
   }
@@ -174,7 +180,9 @@ export function buildModal({
         action_id: "project_select",
         placeholder: { type: "plain_text", text: "Select project…" },
         options: projects.map((project) => toSlackOption(project.text, project.value)),
-        ...(preSelectedProject ? { initial_option: toSlackOption(preSelectedProject.text, preSelectedProject.value) } : {}),
+        ...(preSelectedProject
+          ? { initial_option: toSlackOption(preSelectedProject.text, preSelectedProject.value) }
+          : {}),
       },
     });
   }
@@ -182,11 +190,16 @@ export function buildModal({
   projectFields.forEach((field, index) => {
     const blockId = `pf_${index}`;
     const fieldNameLower = field.name.toLowerCase();
+    const initialProjectFieldValue = initialProjectFieldValues[blockId] ?? null;
+
     if (field.dataType === "SINGLE_SELECT" && field.options?.length > 0) {
       const isMandatory = fieldNameLower === "priority";
-      const defaultOption = fieldNameLower === "status"
-        ? field.options.find((opt) => opt.name.toLowerCase() === "backlog") ?? null
-        : null;
+      const initialOption =
+        field.options.find((opt) => opt.id === initialProjectFieldValue) ??
+        (fieldNameLower === "status"
+          ? field.options.find((opt) => opt.name.toLowerCase() === "backlog") ?? null
+          : null);
+
       blocks.push({
         type: "input",
         block_id: blockId,
@@ -197,7 +210,7 @@ export function buildModal({
           action_id: `${blockId}_input`,
           placeholder: { type: "plain_text", text: `Select ${field.name}…` },
           options: field.options.map((opt) => toSlackOption(opt.name, opt.id)),
-          ...(defaultOption ? { initial_option: toSlackOption(defaultOption.name, defaultOption.id) } : {}),
+          ...(initialOption ? { initial_option: toSlackOption(initialOption.name, initialOption.id) } : {}),
         },
       });
     } else if (field.dataType === "NUMBER" || field.dataType === "TEXT") {
@@ -210,6 +223,7 @@ export function buildModal({
           type: "plain_text_input",
           action_id: `${blockId}_input`,
           placeholder: { type: "plain_text", text: `Enter ${field.name}…` },
+          ...(initialProjectFieldValue != null ? { initial_value: String(initialProjectFieldValue) } : {}),
         },
       });
     }
@@ -240,17 +254,22 @@ export function buildModal({
   };
 }
 
-export function buildAddToIssueModal({ messageText = "", metadata, currentBody = "" }) {
+export function buildAddToIssueModal({
+  messageText = "",
+  metadata,
+  currentBody = "",
+  repoOptions = [],
+}) {
   const blocks = [
     {
       type: "input",
       block_id: "repo_block",
       label: { type: "plain_text", text: "Repository" },
       element: {
-        type: "external_select",
+        type: "static_select",
         action_id: "repo_select",
-        min_query_length: 0,
         placeholder: { type: "plain_text", text: "Pick a repo…" },
+        options: repoOptions.map((repo) => toSlackOption(repo, repo)),
       },
     },
     {
