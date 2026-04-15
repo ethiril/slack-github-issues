@@ -18,11 +18,12 @@ const MAX_BUTTON_VALUE_CHARS = 2000;
 // Prominent single-select fields rendered as card accessories.
 // Order here is the display order on the card. Adding a new prominent card
 // field is a one-line change: give it a key, a label, a project-field name
-// matcher, and a default-option matcher (or null for "first option").
+// matcher, and a default-option matcher (or null for "first option"). Set
+// `noDefault: true` to leave the field unselected by default.
 const CARD_FIELD_SPECS = [
   { key: "type",     label: "Type",     fieldNameMatcher: /^type$/i,   defaultOptionMatcher: null },
   { key: "priority", label: "Priority", fieldNameMatcher: /priority/i, defaultOptionMatcher: /high|p0/i },
-  { key: "severity", label: "Severity", fieldNameMatcher: /severity/i, defaultOptionMatcher: /^s3|minor/i },
+  { key: "severity", label: "Severity", fieldNameMatcher: /severity/i, defaultOptionMatcher: null, noDefault: true },
   { key: "status",   label: "Status",   fieldNameMatcher: /status/i,   defaultOptionMatcher: /backlog/i },
 ];
 
@@ -81,7 +82,9 @@ export function resolveCardFields(projectFields = [], nativeIssueTypes = []) {
         fieldId: matchingProjectField.id ?? null,
         isNativeType: false,
         options: matchingProjectField.options,
-        defaultOptionId: pickDefaultOption(matchingProjectField.options, spec.defaultOptionMatcher)?.id ?? null,
+        defaultOptionId: spec.noDefault
+          ? null
+          : pickDefaultOption(matchingProjectField.options, spec.defaultOptionMatcher)?.id ?? null,
       });
       continue;
     }
@@ -93,7 +96,9 @@ export function resolveCardFields(projectFields = [], nativeIssueTypes = []) {
         fieldId: null,
         isNativeType: true,
         options: nativeIssueTypes,
-        defaultOptionId: pickDefaultOption(nativeIssueTypes, spec.defaultOptionMatcher)?.id ?? null,
+        defaultOptionId: spec.noDefault
+          ? null
+          : pickDefaultOption(nativeIssueTypes, spec.defaultOptionMatcher)?.id ?? null,
       });
     }
   }
