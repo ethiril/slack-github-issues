@@ -43,51 +43,43 @@ export function parseIssueTemplate(base64Content, filename) {
 
 // ── GitHub API helpers ────────────────────────────────────────────────────────
 
-const REPO_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
-
 export function createGitHubHelpers(octokit, githubOwner) {
-  let repoCacheValue = null;
-  let repoCacheExpiry = 0;
+  async function getRepos() {
+    const envRepos = (process.env.GITHUB_REPOS ?? "").split(",").map((r) => r.trim()).filter(Boolean);
+    if (envRepos.length > 0) {
+      console.log(`[getRepos] using GITHUB_REPOS env: ${envRepos.join(", ")}`);
+      return envRepos;
+    }
 
-  async function fetchReposFromGitHub() {
-    const timeout = new Promise((_, reject) =>
-      setTimeout(() => reject(new Error("GitHub API timeout")), 8000)
-    );
-    const fetch = octokit.paginate(octokit.rest.repos.listForOrg, {
-      org: githubOwner,
-      type: "all",
-      per_page: 100,
-    }).catch(() =>
-      octokit.paginate(octokit.rest.repos.listForUser, {
+    // GITHUB_REPOS not set — discover repos via the GitHub API
+    console.log(`[getRepos] GITHUB_REPOS not set, fetching from GitHub API for owner=${githubOwner}`);
+    try {
+      try {
+        const orgRepos = await octokit.paginate(octokit.rest.repos.listForOrg, {
+          org: githubOwner,
+          per_page: 100,
+          sort: "updated",
+        });
+        return orgRepos.map((r) => r.name);
+      } catch (err) {
+        console.error("[getRepos] org fetch failed:", err.message);
+      }
+      const names = orgRepos.map((r) => r.name);
+      console.log(`[getRepos] org repos found: ${names.join(", ") || "(none)"}`);
+      return names;
+    } catch {
+      const userRepos = await octokit.paginate(octokit.rest.repos.listForUser, {
         username: githubOwner,
         per_page: 100,
-      })
-    );
-    const repos = await Promise.race([fetch, timeout]);
-    return repos.map((repo) => repo.name).sort();
-  }
-
-  async function getRepos() {
-    if (process.env.GITHUB_REPOS) {
-      return process.env.GITHUB_REPOS.split(",").map((repoName) => repoName.trim());
+        sort: "updated",
+      }).catch((err) => {
+        console.error(`[getRepos] user repos fetch also failed: ${err.message}`);
+        return [];
+      });
+      const names = userRepos.map((r) => r.name);
+      console.log(`[getRepos] user repos found: ${names.join(", ") || "(none)"}`);
+      return names;
     }
-    if (repoCacheValue && Date.now() < repoCacheExpiry) {
-      return repoCacheValue;
-    }
-    const repos = await fetchReposFromGitHub();
-    repoCacheValue = repos;
-    repoCacheExpiry = Date.now() + REPO_CACHE_TTL_MS;
-    return repos;
-  }
-
-  function warmRepoCache() {
-    fetchReposFromGitHub()
-      .then((repos) => {
-        repoCacheValue = repos;
-        repoCacheExpiry = Date.now() + REPO_CACHE_TTL_MS;
-        console.log(`[github] repo cache warmed: ${repos.length} repos`);
-      })
-      .catch((err) => console.warn("[github] repo cache warm failed:", err.message));
   }
 
   async function getLabels(repoName) {
@@ -131,7 +123,7 @@ export function createGitHubHelpers(octokit, githubOwner) {
     const toProjectOption = (project) => ({ text: project.title, value: project.id });
 
     const orgResult = await octokit.graphql(orgQuery, { owner: githubOwner }).catch(() => null);
-    if (orgResult) {
+    if (orgResult?.organization) {
       return orgResult.organization.projectsV2.nodes.map(toProjectOption);
     }
 
@@ -319,9 +311,40 @@ export function createGitHubHelpers(octokit, githubOwner) {
     return data;
   }
 
+  // Returns org-level native issue types (GitHub Issue Types feature).
+  // Returns [] if the org has none or the feature is not available.
+  async function getIssueTypes() {
+    const query = `query($owner: String!) {
+      organization(login: $owner) {
+        issueTypes(first: 20) {
+          nodes { id name isEnabled }
+        }
+      }
+    }`;
+    const result = await octokit.graphql(query, { owner: githubOwner }).catch((err) => {
+      console.warn(`[getIssueTypes] GraphQL error (owner=${githubOwner}): ${err.message}`);
+      return null;
+    });
+    const all = result?.organization?.issueTypes?.nodes ?? [];
+    const enabled = all.filter((t) => t.isEnabled !== false);
+    console.log(`[getIssueTypes] owner=${githubOwner}, total=${all.length}, enabled=${enabled.length}`, enabled.map((t) => t.name));
+    return enabled;
+  }
+
+  // Sets the native issue type on an issue (not a project field).
+  async function setIssueType(issueNodeId, issueTypeId) {
+    await octokit.graphql(`
+      mutation($issueId: ID!, $issueTypeId: ID!) {
+        updateIssue(input: { id: $issueId, issueTypeId: $issueTypeId }) {
+          issue { id }
+        }
+      }
+    `, { issueId: issueNodeId, issueTypeId })
+      .catch((err) => console.error("Failed to set issue type:", err.message));
+  }
+
   return {
     getRepos,
-    warmRepoCache,
     getLabels,
     getMilestones,
     getProjects,
@@ -335,5 +358,7 @@ export function createGitHubHelpers(octokit, githubOwner) {
     getIssue,
     searchIssues,
     addIssueComment,
+    getIssueTypes,
+    setIssueType,
   };
 }

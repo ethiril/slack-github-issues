@@ -4,17 +4,6 @@
     "description": "Create GitHub issues from any Slack message",
     "background_color": "#280137"
   },
-  "settings": {
-    "org_deploy_enabled": false,
-    "socket_mode_enabled": true,
-    "event_subscriptions": {
-      "bot_events": ["app_mention", "reaction_added"]
-    },
-    "interactivity": {
-      "is_enabled": true
-    },
-    "token_rotation_enabled": false
-  },
   "features": {
     "bot_user": {
       "display_name": "GitHub Butler",
@@ -36,7 +25,8 @@
     ],
     "slash_commands": [
       {
-        "command": "/issue",
+        "command": "/butler",
+        "url": "https://YOUR_LAMBDA_URL/slack/events",
         "description": "Create or look up a GitHub issue",
         "usage_hint": "[title | <num> | repo#<num> | search <query>]",
         "should_escape": false
@@ -56,6 +46,24 @@
         "reactions:read",
         "files:read"
       ]
-    }
+    },
+    "pkce_enabled": false
+  },
+  "settings": {
+    "event_subscriptions": {
+      "request_url": "https://YOUR_LAMBDA_URL/slack/events",
+      "bot_events": [
+        "app_mention",
+        "reaction_added"
+      ]
+    },
+    "interactivity": {
+      "is_enabled": true,
+      "request_url": "https://YOUR_LAMBDA_URL/slack/interactive-endpoint"
+    },
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": false,
+    "token_rotation_enabled": false,
+    "is_mcp_enabled": false
   }
 }

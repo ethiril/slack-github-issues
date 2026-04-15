@@ -17,9 +17,13 @@ describe("buildIssueCard", () => {
     assert.ok(blocks[0].text.text.includes("my-repo"));
   });
 
-  test("first block section also contains the issue title", () => {
+  test("second block is an input block with plain_text_input pre-filled with the title", () => {
     const blocks = buildIssueCard(minimalArgs);
-    assert.ok(blocks[0].text.text.includes("Something broke"));
+    assert.equal(blocks[1].type, "input");
+    assert.equal(blocks[1].block_id, "card_title_block");
+    assert.equal(blocks[1].element.type, "plain_text_input");
+    assert.equal(blocks[1].element.action_id, "card_title_input");
+    assert.equal(blocks[1].element.initial_value, "Something broke");
   });
 
   test("always ends with Create Issue, Customize, and Cancel buttons", () => {

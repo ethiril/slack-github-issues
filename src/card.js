@@ -77,7 +77,19 @@ export function buildIssueCard({
       block_id: "card_intro",
       text: {
         type: "mrkdwn",
-        text: `*New issue in ${repo}*\n${title}`,
+        text: `*New issue in ${repo}*`,
+      },
+    },
+    {
+      type: "input",
+      block_id: "card_title_block",
+      optional: true,
+      label: { type: "plain_text", text: "Issue title" },
+      element: {
+        type: "plain_text_input",
+        action_id: "card_title_input",
+        initial_value: title || "",
+        placeholder: { type: "plain_text", text: "Brief summary" },
       },
     },
   ];
@@ -214,7 +226,7 @@ export function buildIssueCard({
           text: { type: "plain_text", text: "Cancel" },
           action_id: "issue_card_cancel",
           style: "danger",
-          value: "cancel",
+          value: JSON.stringify({ threadTs: safeCardMeta.threadTs }),
         },
       ],
     }
@@ -240,6 +252,7 @@ export function buildCardMeta({
   priorityField = null,
   statusField = null,
   typeField = null,
+  isNativeType = false,
   defaultLabelValues = [],
   defaultMilestoneValue = null,
 }) {
@@ -263,6 +276,7 @@ export function buildCardMeta({
       statusField?.options?.[0]?.id ??
       null,
     typeFieldId: typeField?.id ?? null,
+    isNativeType: isNativeType || false,
     defaultTypeOptionId: null,
     defaultLabelValues,
     defaultMilestoneValue,

@@ -4,10 +4,10 @@ set -euo pipefail
 OUTPUT="${1:-github_butler.zip}"
 
 echo "→ Installing production dependencies…"
-npm ci --omit=dev
+npm ci --omit=dev --silent > /dev/null 2>&1
 
 echo "→ Creating zip: $OUTPUT"
-zip -r "$OUTPUT" \
+zip -qr "$OUTPUT" \
   app.js \
   src/ \
   node_modules/ \

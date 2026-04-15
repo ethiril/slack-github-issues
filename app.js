@@ -15,7 +15,11 @@ if (process.env.GITHUB_BUTLER_SECRET_ID) {
   const { SecretString } = await client.send(
     new GetSecretValueCommand({ SecretId: process.env.GITHUB_BUTLER_SECRET_ID })
   );
-  Object.assign(process.env, JSON.parse(SecretString));
+  // Merge secret values but don't overwrite vars already set in the Lambda environment
+  const secret = JSON.parse(SecretString);
+  for (const [key, value] of Object.entries(secret)) {
+    if (!process.env[key]) process.env[key] = value;
+  }
 }
 
 // Mode is inferred from the environment:
@@ -60,8 +64,6 @@ const github = createGitHubHelpers(octokit, process.env.GITHUB_OWNER);
 
 registerHandlers(app, github);
 
-// Pre-warm the repo cache so the first Slack options request doesn't cold-fetch
-github.warmRepoCache();
 
 if (isSocketMode) {
   (async () => {

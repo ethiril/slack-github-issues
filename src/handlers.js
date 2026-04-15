@@ -4,11 +4,26 @@ import {
   buildAddToIssueModal,
   buildProjectFieldMap,
   resolveDefaultProjectId,
-  toSlackOption,
 } from "./modal.js";
 import { fetchThreadMessages, compileThreadWithMeta, deriveTitle } from "./thread.js";
 import { buildIssueCard, buildCardMeta } from "./card.js";
-import { registerThreadIssue, getThreadIssue, updateThreadIssueSyncTs } from "./thread-store.js";
+import { registerThreadIssue, getThreadIssue, updateThreadIssueSyncTs, claimCardPost, releaseCardPost } from "./thread-store.js";
+
+// Deduplication: prevents duplicate modal opens or issue creations from Lambda
+// retries or rapid double-clicks. Keyed on action_ts (actions/shortcuts) or
+// view.id (view submissions). Entries expire after 30 seconds.
+const _seen = new Map();
+const DEDUP_MS = 30_000;
+
+function isDuplicate(key) {
+  const now = Date.now();
+  for (const [k, t] of _seen) {
+    if (now - t > DEDUP_MS) _seen.delete(k);
+  }
+  if (_seen.has(key)) return true;
+  _seen.set(key, now);
+  return false;
+}
 
 // GitHub repo names: alphanumeric, hyphen, underscore, dot; cannot start with
 // dot or hyphen; max 100 chars. Validated before making any API call with a
@@ -147,7 +162,17 @@ async function postIssueCard({ client, github, channelId, threadTs, userId, mess
 
   const priorityField = projectFields.find((f) => /priority/i.test(f.name)) ?? null;
   const statusField = projectFields.find((f) => /status/i.test(f.name)) ?? null;
-  const typeField = projectFields.find((f) => /^type$/i.test(f.name)) ?? null;
+  const projectTypeField = projectFields.find((f) => /^type$/i.test(f.name)) ?? null;
+
+  // Prefer native org issue types over a project SINGLE_SELECT field named "Type".
+  // Native types are always fetched so they show even without a default project.
+  const nativeIssueTypes = projectTypeField
+    ? []
+    : await github.getIssueTypes().catch(() => []);
+  const isNativeType = nativeIssueTypes.length > 0;
+  const typeField = projectTypeField
+    ?? (isNativeType ? { id: null, name: "Type", options: nativeIssueTypes } : null);
+  console.log(`[postIssueCard] type: projectTypeField=${projectTypeField?.name ?? "none"}, nativeTypes=${nativeIssueTypes.length}, typeField=${typeField?.name ?? "none"} (${typeField?.options?.length ?? 0} options)`);
   const title = deriveTitle(messageText);
   // Use lines after the first as the body; avoids duplicating the title in the body
   const bodyLines = messageText.split("\n").slice(1).join("\n").trim();
@@ -171,6 +196,7 @@ async function postIssueCard({ client, github, channelId, threadTs, userId, mess
     priorityField,
     statusField,
     typeField,
+    isNativeType,
     defaultLabelValues,
     defaultMilestoneValue: defaults.milestoneValue ?? null,
   });
@@ -188,9 +214,8 @@ async function postIssueCard({ client, github, channelId, threadTs, userId, mess
     cardMeta,
   });
 
-  await client.chat.postEphemeral({
+  await client.chat.postMessage({
     channel: channelId,
-    user: userId,
     ...(threadTs ? { thread_ts: threadTs } : {}),
     text: `New issue: ${title}`,
     blocks,
@@ -231,6 +256,7 @@ export function registerHandlers(app, github) {
   // 1. Message shortcut → open the modal
   app.shortcut("create_github_issue", async ({ shortcut, ack, client }) => {
     await ack();
+    if (isDuplicate(shortcut.action_ts)) return;
 
     const messageText = shortcut.message?.text ?? "";
     const channelId = shortcut.channel?.id;
@@ -252,9 +278,15 @@ export function registerHandlers(app, github) {
       projectFieldMap: {},
     };
 
+    const repoOptions = await github.getRepos();
+
     await client.views.open({
       trigger_id: shortcut.trigger_id,
-      view: buildModal({ messageText, metadata: slackMessageContext }),
+      view: buildModal({
+        messageText,
+        metadata: slackMessageContext,
+        repoOptions,
+      }),
     });
   });
 
@@ -264,30 +296,34 @@ export function registerHandlers(app, github) {
   //    /issue repo#123  → look up issue in a specific repo
   //    /issue search q  → search open issues
   //    /issue <text>    → open form with title pre-filled
-  app.command("/issue", async ({ command, ack, client }) => {
+  app.command("/butler", async ({ command, ack, client }) => {
     await ack();
 
     const text = (command.text ?? "").trim();
     const userId = command.user_id;
+    const channelId = command.channel_id;
+    // Present when the command is invoked from inside a thread
+    const threadTs = command.thread_ts ?? null;
 
     const plainNumMatch = /^(\d+)$/.exec(text);
     if (plainNumMatch) {
       const defaults = getUserDefaults(userId);
       if (!defaults.repo) {
         await client.chat.postEphemeral({
-          channel: command.channel_id,
+          channel: channelId,
           user: userId,
-          text: "No default repo saved. Create an issue first, or use `/issue repo-name#123`.",
+          ...(threadTs ? { thread_ts: threadTs } : {}),
+          text: "No default repo saved. Create an issue first, or use `/butler repo-name#123`.",
         });
         return;
       }
-      await showIssue(client, command.channel_id, userId, defaults.repo, parseInt(plainNumMatch[1], 10), github);
+      await showIssue(client, channelId, userId, defaults.repo, parseInt(plainNumMatch[1], 10), github);
       return;
     }
 
     const repoNumMatch = /^([^#\s]+)#(\d+)$/.exec(text);
     if (repoNumMatch) {
-      await showIssue(client, command.channel_id, userId, repoNumMatch[1], parseInt(repoNumMatch[2], 10), github);
+      await showIssue(client, channelId, userId, repoNumMatch[1], parseInt(repoNumMatch[2], 10), github);
       return;
     }
 
@@ -295,8 +331,9 @@ export function registerHandlers(app, github) {
       const query = text.slice(7).trim();
       if (!query) {
         await client.chat.postEphemeral({
-          channel: command.channel_id,
+          channel: channelId,
           user: userId,
+          ...(threadTs ? { thread_ts: threadTs } : {}),
           text: "Usage: `/issue search <query>`",
         });
         return;
@@ -304,8 +341,9 @@ export function registerHandlers(app, github) {
       const items = await github.searchIssues(query).catch(() => []);
       if (items.length === 0) {
         await client.chat.postEphemeral({
-          channel: command.channel_id,
+          channel: channelId,
           user: userId,
+          ...(threadTs ? { thread_ts: threadTs } : {}),
           text: `No issues found for "${query}".`,
         });
         return;
@@ -317,8 +355,9 @@ export function registerHandlers(app, github) {
         })
         .join("\n");
       await client.chat.postEphemeral({
-        channel: command.channel_id,
+        channel: channelId,
         user: userId,
+        ...(threadTs ? { thread_ts: threadTs } : {}),
         text: `Search results for "${query}"`,
         blocks: [{
           type: "section",
@@ -328,19 +367,23 @@ export function registerHandlers(app, github) {
       return;
     }
 
-    // Default: open form (text becomes pre-filled title)
+    // Default: open form (text becomes pre-filled title).
+    // threadTs is passed through so issues created from a thread are linked back to it.
+    const repoOptions = await github.getRepos();
+
     await client.views.open({
       trigger_id: command.trigger_id,
       view: buildModal({
         currentTitle: text,
         metadata: {
-          channelId: command.channel_id,
-          threadTs: null,
+          channelId,
+          threadTs,
           messageTs: null,
           userId,
           permalink: "",
           projectFieldMap: {},
         },
+        repoOptions,
       }),
     });
   });
@@ -361,8 +404,14 @@ export function registerHandlers(app, github) {
     // Caret shortcut: text ends with "^"
     // If the thread already has a linked issue → append new messages as a comment (tag update).
     // Otherwise → show the issue card pre-filled from the previous non-bot message.
+    //
+    // Optional repo override: "@butler <repo-name> ^" uses that repo instead of the default.
+    // e.g. "@GitHub Butler repo-name ^"
     if (rawText.endsWith("^")) {
       const userId = event.user;
+
+      // In-process dedup: drop Lambda retries arriving on the same instance
+      if (isDuplicate(`mention:${event.ts}:${userId}`)) return;
 
       // Tag update: check for an existing thread → issue mapping
       const existingIssue = await getThreadIssue(threadTs);
@@ -379,14 +428,25 @@ export function registerHandlers(app, github) {
       // No existing issue → show card from the previous non-bot message
       const defaults = getUserDefaults(userId);
 
-      if (!defaults.repo) {
+      // Parse optional repo override: the single word immediately before "^"
+      // e.g. "repo-name ^" → repoOverride = "repo-name"
+      const words = rawText.split(/\s+/).filter(Boolean);
+      const possibleRepo = words.length >= 2 ? words[words.length - 2] : null;
+      const repoOverride = (possibleRepo && isValidRepoName(possibleRepo)) ? possibleRepo : null;
+      const repo = repoOverride ?? defaults.repo ?? null;
+
+      if (!repo) {
         await client.chat.postEphemeral({
           channel: event.channel,
           user: userId,
           thread_ts: threadTs,
-          text: "No default repo saved. Use *Create Issue* (form) once to set your preferences.",
+          text: "No default repo saved. Use *Create Issue* (form) once to set your preferences, or specify a repo: `@GitHub Butler <repo-name> ^`.",
         });
         return;
+      }
+
+      if (repoOverride) {
+        console.log(`[mention/caret] using repo override: ${repoOverride}`);
       }
 
       let prevMessage = null;
@@ -431,7 +491,7 @@ export function registerHandlers(app, github) {
         userId,
         messageText: prevMessage.text ?? "",
         permalink: permalinkResult?.permalink ?? "",
-        repo: defaults.repo,
+        repo,
       }).catch(async (err) => {
         console.error("Failed to post issue card from caret mention:", err);
         await client.chat.postEphemeral({
@@ -495,12 +555,18 @@ export function registerHandlers(app, github) {
   // 4. "Create Issue" button from @mention → open the modal
   app.action("open_modal_from_mention", async ({ ack, action, body, client }) => {
     await ack();
+    if (isDuplicate(action.action_ts)) return;
 
     const { issueTitle, ...slackMessageContext } = JSON.parse(action.value);
+    const repoOptions = await github.getRepos();
 
     await client.views.open({
       trigger_id: body.trigger_id,
-      view: buildModal({ currentTitle: issueTitle ?? "", metadata: slackMessageContext }),
+      view: buildModal({
+        currentTitle: issueTitle ?? "",
+        metadata: slackMessageContext,
+        repoOptions,
+      }),
     });
   });
 
@@ -598,6 +664,12 @@ export function registerHandlers(app, github) {
     const threadTs = message.thread_ts ?? message.ts;
     const userId = event.user;
 
+    // In-process dedup: drop Lambda retries that arrive within the same instance
+    if (isDuplicate(`reaction:${event.event_ts ?? messageTs}:${userId}`)) {
+      console.log("[reaction] duplicate event, skipping");
+      return;
+    }
+
     // Check for an existing thread → issue mapping (tag update flow)
     const existingIssue = await getThreadIssue(threadTs);
     if (existingIssue) {
@@ -613,6 +685,14 @@ export function registerHandlers(app, github) {
         thread_ts: threadTs,
         text: "No default repo saved. Use *Create Issue* (form) once to set your preferences, or use a repo-specific emoji like `:frontend_github_butler:`.",
       });
+      return;
+    }
+
+    // Cross-instance dedup: claim the card post in DynamoDB / in-memory.
+    // If another Lambda instance already claimed it, bail out silently.
+    const claimed = await claimCardPost(threadTs).catch(() => true); // on error, proceed
+    if (!claimed) {
+      console.log("[reaction] card already claimed for thread, skipping", { threadTs });
       return;
     }
 
@@ -632,6 +712,8 @@ export function registerHandlers(app, github) {
       repo,
     }).catch(async (err) => {
       console.error("Failed to post issue card:", err);
+      // Release the claim on failure so the user can react again
+      await releaseCardPost(threadTs).catch(() => {});
       await client.chat.postEphemeral({
         channel: channelId,
         user: userId,
@@ -639,16 +721,6 @@ export function registerHandlers(app, github) {
         text: `Failed to create issue card: ${safeErrorMessage(err)}`,
       });
     });
-  });
-
-  // 7. External data source for the repo selector (used by both modals)
-  app.options("repo_select", async ({ ack }) => {
-    try {
-      const repos = await github.getRepos();
-      await ack({ options: repos.map((repoName) => toSlackOption(repoName, repoName)) });
-    } catch (err) {
-      await ack({ options: [toSlackOption(`Error: ${err.message}`, "__error__")] });
-    }
   });
 
   // 8. Repo selected → load labels/milestones/projects/templates and apply user defaults
@@ -667,7 +739,8 @@ export function registerHandlers(app, github) {
     const currentProjectFieldValues = collectModalProjectFieldValues(modalView.state.values);
     const defaults = getUserDefaults(body.user?.id);
 
-    const [labels, milestones, projects, templates] = await Promise.all([
+    const [repoOptions, labels, milestones, projects, templates] = await Promise.all([
+      github.getRepos(),
       github.getLabels(selectedRepo),
       github.getMilestones(selectedRepo),
       github.getProjects(),
@@ -708,6 +781,7 @@ export function registerHandlers(app, github) {
         initialMilestoneValue,
         initialLabelValues,
         initialProjectFieldValues: currentProjectFieldValues,
+        repoOptions,
       }),
     });
   });
@@ -726,7 +800,8 @@ export function registerHandlers(app, github) {
     const currentProjectId = modalView.state.values.project_block?.project_select?.selected_option?.value ?? null;
     const currentProjectFieldValues = collectModalProjectFieldValues(modalView.state.values);
 
-    const [labels, milestones, projects, templates, projectFields] = await Promise.all([
+    const [repoOptions, labels, milestones, projects, templates, projectFields] = await Promise.all([
+      github.getRepos(),
       github.getLabels(selectedRepo),
       github.getMilestones(selectedRepo),
       github.getProjects(),
@@ -767,6 +842,7 @@ export function registerHandlers(app, github) {
         initialMilestoneValue,
         initialLabelValues,
         initialProjectFieldValues: currentProjectFieldValues,
+        repoOptions,
       }),
     });
   });
@@ -788,7 +864,8 @@ export function registerHandlers(app, github) {
     const currentMilestoneValue = modalView.state.values.milestone_block?.milestone_select?.selected_option?.value ?? null;
     const currentProjectFieldValues = collectModalProjectFieldValues(modalView.state.values);
 
-    const [labels, milestones, projects, templates, projectFields] = await Promise.all([
+    const [repoOptions, labels, milestones, projects, templates, projectFields] = await Promise.all([
+      github.getRepos(),
       github.getLabels(selectedRepo),
       github.getMilestones(selectedRepo),
       github.getProjects(),
@@ -814,6 +891,7 @@ export function registerHandlers(app, github) {
         initialMilestoneValue: currentMilestoneValue,
         initialLabelValues: currentLabelValues,
         initialProjectFieldValues: currentProjectFieldValues,
+        repoOptions,
       }),
     });
   });
@@ -840,9 +918,15 @@ export function registerHandlers(app, github) {
       permalink: permalinkResult?.permalink ?? "",
     };
 
+    const repoOptions = await github.getRepos();
+
     await client.views.open({
       trigger_id: shortcut.trigger_id,
-      view: buildAddToIssueModal({ messageText, metadata: slackMessageContext }),
+      view: buildAddToIssueModal({
+        messageText,
+        metadata: slackMessageContext,
+        repoOptions,
+      }),
     });
   });
 
@@ -869,6 +953,7 @@ export function registerHandlers(app, github) {
     });
 
     await ack();
+    if (isDuplicate(`view:${view.id}`)) return;
 
     const slackThreadLink = slackMessageContext.permalink
       ? `\n\n---\n_Created from Slack: ${slackMessageContext.permalink}_`
@@ -1014,9 +1099,13 @@ export function registerHandlers(app, github) {
   // 14. Card "Create Issue" button → create issue from card state + cardMeta defaults
   app.action("issue_card_create", async ({ ack, action, body, client, respond }) => {
     await ack();
+    if (isDuplicate(action.action_ts)) return;
 
     const cardMeta = JSON.parse(action.value);
     const stateValues = body.state?.values ?? {};
+
+    // Read title from the inline input — falls back to the auto-derived title stored in cardMeta
+    const issueTitle = stateValues.card_title_block?.card_title_input?.value?.trim() || cardMeta.title;
 
     const typeOptionId =
       stateValues.card_type?.card_type_select?.selected_option?.value ??
@@ -1060,11 +1149,16 @@ export function registerHandlers(app, github) {
     try {
       const createdIssue = await github.createIssue({
         repo: cardMeta.repo,
-        title: cardMeta.title,
+        title: issueTitle,
         body: issueBody,
         labels: selectedLabelValues.length > 0 ? selectedLabelValues : undefined,
         milestone: milestoneValue && milestoneValue !== "" && milestoneValue !== "__none__" ? Number(milestoneValue) : undefined,
       });
+
+      // Set native issue type immediately after creation (independent of project)
+      if (cardMeta.isNativeType && typeOptionId) {
+        await github.setIssueType(createdIssue.node_id, typeOptionId);
+      }
 
       if (cardMeta.projectId) {
         const projectItemId = await github.addIssueToProject(cardMeta.projectId, createdIssue.node_id)
@@ -1073,7 +1167,7 @@ export function registerHandlers(app, github) {
         if (projectItemId) {
           const fieldUpdates = [];
 
-          if (cardMeta.typeFieldId && typeOptionId) {
+          if (!cardMeta.isNativeType && cardMeta.typeFieldId && typeOptionId) {
             fieldUpdates.push(
               github.setProjectField(
                 cardMeta.projectId,
@@ -1110,20 +1204,21 @@ export function registerHandlers(app, github) {
         }
       }
 
-      // Register thread → issue mapping for future tag updates
-      if (cardMeta.threadTs) {
-        const allMsgs = await fetchThreadMessages(client, cardMeta.channelId, cardMeta.threadTs).catch(() => []);
-        const latestTs = allMsgs.length > 0 ? allMsgs[allMsgs.length - 1].ts : cardMeta.threadTs;
-        await registerThreadIssue(cardMeta.threadTs, cardMeta.repo, createdIssue.number, latestTs);
-      }
-
       await respond({ delete_original: true });
-      await client.chat.postMessage({
+
+      // Post the confirmation first so we can use its ts as lastSyncedTs — this prevents
+      // the bot's own "Issue created" message from being included in the next tag update.
+      const confirmMsg = await client.chat.postMessage({
         channel: cardMeta.channelId,
         ...(cardMeta.threadTs ? { thread_ts: cardMeta.threadTs } : {}),
         unfurl_links: false,
-        text: `Issue created: <${createdIssue.html_url}|${cardMeta.repo}#${createdIssue.number} -- ${cardMeta.title}>`,
+        text: `Issue created: <${createdIssue.html_url}|${cardMeta.repo}#${createdIssue.number} -- ${issueTitle}>`,
       });
+
+      if (cardMeta.threadTs) {
+        const latestTs = confirmMsg?.ts ?? cardMeta.threadTs;
+        await registerThreadIssue(cardMeta.threadTs, cardMeta.repo, createdIssue.number, latestTs);
+      }
     } catch (err) {
       console.error("Card issue creation failed:", err);
       await respond({
@@ -1136,6 +1231,7 @@ export function registerHandlers(app, github) {
   // 15. Card "Customize" button → open the full form modal pre-filled from card state
   app.action("issue_card_customize", async ({ ack, action, body, client, respond }) => {
     await ack();
+    if (isDuplicate(action.action_ts)) return;
 
     const cardMeta = JSON.parse(action.value);
     const stateValues = body.state?.values ?? {};
@@ -1149,7 +1245,8 @@ export function registerHandlers(app, github) {
       stateValues.card_milestone?.card_milestone_select?.selected_option?.value ??
       cardMeta.defaultMilestoneValue ?? null;
 
-    const [labels, milestones, projects, projectFields] = await Promise.all([
+    const [repoOptions, labels, milestones, projects, projectFields] = await Promise.all([
+      github.getRepos(),
       github.getLabels(cardMeta.repo),
       github.getMilestones(cardMeta.repo),
       github.getProjects(),
@@ -1166,12 +1263,14 @@ export function registerHandlers(app, github) {
       projectFieldMap: buildProjectFieldMap(projectFields),
     };
 
+    const currentTitle = stateValues.card_title_block?.card_title_input?.value?.trim() || cardMeta.title;
+
     await client.views.open({
       trigger_id: body.trigger_id,
       view: buildModal({
         selectedRepo: cardMeta.repo,
         metadata: slackMessageContext,
-        currentTitle: cardMeta.title,
+        currentTitle,
         currentBody: cardMeta.messageText,
         labels,
         milestones,
@@ -1181,22 +1280,31 @@ export function registerHandlers(app, github) {
         initialLabelValues: currentLabelValues,
         initialMilestoneValue: currentMilestoneValue,
         initialProjectFieldValues,
+        repoOptions,
       }),
     });
 
     await respond({ delete_original: true });
   });
 
-  // 16. Card "Cancel" button → dismiss the card
-  app.action("issue_card_cancel", async ({ ack, respond }) => {
+  // 16. Card "Cancel" button → dismiss the card and release the card claim so
+  // the user can react again later if they change their mind.
+  app.action("issue_card_cancel", async ({ ack, action, respond }) => {
     await ack();
     await respond({ delete_original: true });
+    try {
+      const { threadTs } = JSON.parse(action.value);
+      if (threadTs) await releaseCardPost(threadTs);
+    } catch {
+      // value may be legacy "cancel" string — nothing to release
+    }
   });
 
-  // 17. No-op handler for card dropdown interactions
-  // The card uses actions blocks/section accessories, so Slack fires an
-  // action event on every dropdown change. We ack immediately and let state
-  // accumulate in body.state.values for when the Create button is pressed.
+  // 17. No-op handler for card dropdown interactions.
+  // The card uses section accessories (static_select / multi_static_select),
+  // so Slack fires an action event on every dropdown change.
+  // We ack immediately and let state accumulate in body.state.values for
+  // when the Create button is pressed.
   app.action(/^card_/, async ({ ack }) => {
     await ack();
   });

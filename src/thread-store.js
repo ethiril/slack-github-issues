@@ -11,6 +11,10 @@ const TABLE = process.env.DYNAMODB_TABLE;
 // In-memory fallback
 const memoryMap = new Map();
 
+// Tracks threads where a card has been posted but no issue created yet.
+// Prevents duplicate cards from Lambda retries or rapid reactions.
+const claimedCards = new Set();
+
 // DynamoDB client — created lazily only if TABLE is set, to avoid loading the
 // AWS SDK in local Socket Mode where DynamoDB is not used.
 let dynamo = null;
@@ -33,10 +37,65 @@ async function getDynamo() {
     }));
     console.log(`[thread-store] created DynamoDB table: ${TABLE}`);
   } catch (err) {
-    if (err.name !== "ResourceInUseException") throw err;
+    if (err.name === "ResourceInUseException") {
+      // Table already exists — expected on every cold start after first deploy
+    } else if (err.name === "AccessDeniedException") {
+      // Role lacks CreateTable — assume the table was pre-provisioned and proceed
+      console.warn(`[thread-store] no CreateTable permission; assuming ${TABLE} already exists`);
+    } else {
+      throw err;
+    }
   }
   dynamo = DynamoDBDocumentClient.from(raw);
   return dynamo;
+}
+
+// Atomically claim the right to post a card for a thread.
+// Returns true if the claim was acquired (this caller should post the card).
+// Returns false if another process already claimed it (duplicate — skip).
+// The claim is released when:
+//   a) The user cancels the card → releaseCardPost()
+//   b) An issue is created → registerThreadIssue() overwrites the entry
+export async function claimCardPost(threadTs) {
+  if (!TABLE) {
+    if (claimedCards.has(threadTs) || memoryMap.has(threadTs)) return false;
+    claimedCards.add(threadTs);
+    return true;
+  }
+
+  const { PutCommand } = await import("@aws-sdk/lib-dynamodb");
+  const db = await getDynamo();
+  try {
+    await db.send(new PutCommand({
+      TableName: TABLE,
+      Item: { threadTs, status: "card_pending", claimedAt: Date.now() },
+      ConditionExpression: "attribute_not_exists(threadTs)",
+    }));
+    return true;
+  } catch (err) {
+    if (err.name === "ConditionalCheckFailedException") return false;
+    throw err;
+  }
+}
+
+// Release the card claim so the user can react again later.
+// No-op if the thread already has a real issue registered.
+export async function releaseCardPost(threadTs) {
+  if (!TABLE) {
+    claimedCards.delete(threadTs);
+    return;
+  }
+
+  const { DeleteCommand } = await import("@aws-sdk/lib-dynamodb");
+  const db = await getDynamo();
+  // Only delete if still pending (not overwritten by a real issue entry)
+  await db.send(new DeleteCommand({
+    TableName: TABLE,
+    Key: { threadTs },
+    ConditionExpression: "#s = :pending",
+    ExpressionAttributeNames: { "#s": "status" },
+    ExpressionAttributeValues: { ":pending": "card_pending" },
+  })).catch(() => {}); // Ignore if item doesn't exist or is a real issue
 }
 
 export async function registerThreadIssue(threadTs, repo, issueNumber, lastSyncedTs) {
@@ -87,4 +146,5 @@ export async function updateThreadIssueSyncTs(threadTs, lastSyncedTs) {
 // For testing only
 export function clearThreadIssueMap() {
   memoryMap.clear();
+  claimedCards.clear();
 }
