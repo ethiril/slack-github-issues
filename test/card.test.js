@@ -57,7 +57,7 @@ describe("resolveCardFields", () => {
     assert.equal(status.defaultOptionId, "s2");
   });
 
-  test("resolves severity field and picks S3/Minor as default", () => {
+  test("resolves severity field with no default option selected", () => {
     const projectFields = [
       {
         id: "pf_severity",
@@ -76,19 +76,7 @@ describe("resolveCardFields", () => {
     assert.equal(severity.label, "Severity");
     assert.equal(severity.fieldId, "pf_severity");
     assert.equal(severity.isNativeType, false);
-    assert.equal(severity.defaultOptionId, "s3");
-  });
-
-  test("severity falls back to first option when no S3/Minor match exists", () => {
-    const projectFields = [
-      {
-        id: "pf_sev",
-        name: "Severity",
-        options: [{ id: "x1", name: "Low" }, { id: "x2", name: "High" }],
-      },
-    ];
-    const [severity] = resolveCardFields(projectFields, []);
-    assert.equal(severity.defaultOptionId, "x1");
+    assert.equal(severity.defaultOptionId, null);
   });
 
   test("uses a project Type field when present", () => {
