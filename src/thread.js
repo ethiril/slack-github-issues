@@ -7,6 +7,70 @@ export async function fetchThreadMessages(client, channelId, threadTs) {
   return result?.messages ?? [];
 }
 
+const _clientIdentityCache = new WeakMap();
+
+// Resolves this bot's own identity (bot_id, user_id) via auth.test, cached per
+// client instance. Used to filter out only Butler's own messages from thread
+// dumps — other bots (Sentry, PagerDuty, etc.) should still be included.
+// Degrades to nulls if auth.test is unavailable (e.g. in tests without mocking).
+export async function getOwnBotIdentity(client) {
+  if (!client) return { botId: null, userId: null };
+  if (_clientIdentityCache.has(client)) return _clientIdentityCache.get(client);
+  try {
+    if (!client?.auth?.test) return { botId: null, userId: null };
+    const result = await client.auth.test();
+    const identity = { botId: result?.bot_id ?? null, userId: result?.user_id ?? null };
+    if (identity.botId || identity.userId) _clientIdentityCache.set(client, identity);
+    return identity;
+  } catch {
+    return { botId: null, userId: null };
+  }
+}
+
+function extractBlockText(block) {
+  if (!block) return "";
+  if ((block.type === "section" || block.type === "header") && block.text?.text) {
+    return block.text.text;
+  }
+  if (block.type === "context") {
+    return (block.elements ?? [])
+      .map((element) => element.text ?? "")
+      .filter(Boolean)
+      .join(" ");
+  }
+  if (block.type === "rich_text") {
+    return (block.elements ?? [])
+      .flatMap((element) => (element.elements ?? []).map((leaf) => leaf.text ?? ""))
+      .filter(Boolean)
+      .join("");
+  }
+  return "";
+}
+
+// Slack bot apps (Sentry, PagerDuty, etc.) typically post content in attachments
+// or blocks rather than in `message.text`. Falls back through these in priority
+// order so dumped threads include the alert body, not just an empty string.
+export function extractMessageText(message) {
+  if (!message) return "";
+  if (message.subtype === "file_share") return "";
+
+  const baseText = (message.text ?? "").trim();
+  if (baseText) return baseText;
+
+  const attachmentText = (message.attachments ?? [])
+    .map((attachment) => attachment.text || attachment.fallback || attachment.title || "")
+    .filter(Boolean)
+    .join("\n\n")
+    .trim();
+  if (attachmentText) return attachmentText;
+
+  return (message.blocks ?? [])
+    .map(extractBlockText)
+    .filter(Boolean)
+    .join("\n\n")
+    .trim();
+}
+
 export function compileThread(messages) {
   if (messages.length === 0) return "";
   const lines = messages
@@ -92,9 +156,17 @@ async function decodeSlackText(text, userCache, client) {
 // Options:
 //   sinceTs — only include messages newer than this Slack ts (tag update flow)
 export async function compileThreadWithMeta(client, messages, { sinceTs } = {}) {
-  const filteredMessages = sinceTs
-    ? messages.filter((message) => parseFloat(message.ts) > parseFloat(sinceTs))
+  // Exclude only Butler's own messages (its "Issue created" / "Thread update added"
+  // confirmations). Other bots like Sentry carry the actual thread context and
+  // must be preserved. If auth.test is unavailable, skip filtering entirely.
+  const { botId: ownBotId } = await getOwnBotIdentity(client);
+  const nonOwnMessages = ownBotId
+    ? messages.filter((message) => message.bot_id !== ownBotId)
     : messages;
+
+  const filteredMessages = sinceTs
+    ? nonOwnMessages.filter((message) => parseFloat(message.ts) > parseFloat(sinceTs))
+    : nonOwnMessages;
 
   if (filteredMessages.length === 0) return "";
 
@@ -104,7 +176,7 @@ export async function compileThreadWithMeta(client, messages, { sinceTs } = {}) 
     filteredMessages.map(async (message) => {
       // file_share messages carry the filename as message.text — suppress it since
       // we render the actual file as a link below.
-      const rawText = message.subtype === "file_share" ? "" : (message.text ?? "").trim();
+      const rawText = extractMessageText(message);
       const text = rawText ? await decodeSlackText(rawText, userCache, client) : "";
 
       // Slack stores file attachments in message.files (plural, newer) or message.file

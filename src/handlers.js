@@ -5,7 +5,7 @@ import {
   buildProjectFieldMap,
   resolveDefaultProjectId,
 } from "./modal.js";
-import { fetchThreadMessages, compileThreadWithMeta, deriveTitle } from "./thread.js";
+import { fetchThreadMessages, compileThreadWithMeta, deriveTitle, getOwnBotIdentity, extractMessageText } from "./thread.js";
 import {
   buildIssueCard,
   buildCardMeta,
@@ -451,10 +451,13 @@ export function registerHandlers(app, github) {
       let prevMessage = null;
 
       if (event.thread_ts) {
-        // In a thread: find the last non-bot message before this @mention
+        // In a thread: find the most recent message before this @mention,
+        // excluding only Butler's own posts. Other bots (e.g. Sentry) stay
+        // eligible so their alert content can seed the issue body.
         const threadMsgs = await fetchThreadMessages(client, event.channel, event.thread_ts);
+        const { botId: ownBotId } = await getOwnBotIdentity(client);
         prevMessage = [...threadMsgs]
-          .filter((m) => parseFloat(m.ts) < parseFloat(event.ts) && !m.bot_id)
+          .filter((m) => parseFloat(m.ts) < parseFloat(event.ts) && m.bot_id !== ownBotId)
           .sort((a, b) => parseFloat(b.ts) - parseFloat(a.ts))[0] ?? null;
       } else {
         // Top-level: fetch the message immediately above in the channel
@@ -477,6 +480,15 @@ export function registerHandlers(app, github) {
         return;
       }
 
+      // Cross-instance dedup: claim the card post in DynamoDB / in-memory.
+      // Prevents duplicate cards when a Lambda retry lands on a different
+      // instance (in-process isDuplicate above only catches same-instance retries).
+      const claimed = await claimCardPost(threadTs).catch(() => true); // on error, proceed
+      if (!claimed) {
+        console.log("[mention/caret] card already claimed for thread, skipping", { threadTs });
+        return;
+      }
+
       const permalinkResult = await client.chat.getPermalink({
         channel: event.channel,
         message_ts: prevMessage.ts,
@@ -488,11 +500,13 @@ export function registerHandlers(app, github) {
         channelId: event.channel,
         threadTs,
         userId,
-        messageText: prevMessage.text ?? "",
+        messageText: extractMessageText(prevMessage),
         permalink: permalinkResult?.permalink ?? "",
         repo,
       }).catch(async (err) => {
         console.error("Failed to post issue card from caret mention:", err);
+        // Release the claim on failure so the user can try again
+        await releaseCardPost(threadTs).catch(() => {});
         await client.chat.postEphemeral({
           channel: event.channel,
           user: userId,
@@ -706,7 +720,7 @@ export function registerHandlers(app, github) {
       channelId,
       threadTs,
       userId,
-      messageText: message.text ?? "",
+      messageText: extractMessageText(message),
       permalink: permalinkResult?.permalink ?? "",
       repo,
     }).catch(async (err) => {
@@ -1127,15 +1141,11 @@ export function registerHandlers(app, github) {
       ?? cardMeta.defaultMilestoneValue
       ?? null;
 
-    // Compile thread for the issue body
+    // Issue body is just the single target message. Thread context is opt-in
+    // via a subsequent tag update (butler emoji reaction or @mention with ^).
+    // Auto-pulling the thread here would include messages posted after the
+    // user's request and the bot's own card messages, producing spam.
     let issueBody = cardMeta.messageText || "";
-    if (cardMeta.threadTs) {
-      const threadMessages = await fetchThreadMessages(client, cardMeta.channelId, cardMeta.threadTs);
-      if (threadMessages.length > 1) {
-        const threadContent = await compileThreadWithMeta(client, threadMessages);
-        if (threadContent) issueBody = threadContent;
-      }
-    }
     if (cardMeta.permalink) {
       issueBody += `\n\n---\n_Created from Slack: ${cardMeta.permalink}_`;
     }

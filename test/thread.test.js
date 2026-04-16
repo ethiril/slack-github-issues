@@ -1,6 +1,6 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { compileThread, compileThreadWithMeta, deriveTitle } from "../src/thread.js";
+import { compileThread, compileThreadWithMeta, deriveTitle, extractMessageText } from "../src/thread.js";
 
 describe("compileThread", () => {
   test("returns empty string for empty array", () => {
@@ -76,7 +76,7 @@ describe("deriveTitle", () => {
 // ── compileThreadWithMeta ─────────────────────────────────────────────────────
 
 describe("compileThreadWithMeta", () => {
-  function makeClient(userMap) {
+  function makeClient(userMap, { ownBotId = null } = {}) {
     const callCount = {};
     const client = {
       users: {
@@ -86,6 +86,9 @@ describe("compileThreadWithMeta", () => {
           if (!name) throw new Error("user not found");
           return { user: { profile: { display_name: name } } };
         },
+      },
+      auth: {
+        test: async () => ({ bot_id: ownBotId, user_id: "UBUTLER" }),
       },
       _callCount: callCount,
     };
@@ -168,5 +171,85 @@ describe("compileThreadWithMeta", () => {
     const messages = [{ ts: "1000.0", text: "Hello" }];
     const result = await compileThreadWithMeta(makeClient({}), messages);
     assert.ok(result.includes("Unknown"));
+  });
+
+  test("filters out Butler's own bot messages but keeps other bots", async () => {
+    const messages = [
+      { ts: "1000.0", bot_id: "BSENTRY", bot_profile: { name: "Sentry" }, text: "TypeError: boom" },
+      { ts: "1001.0", user: "U1", text: "investigating" },
+      { ts: "1002.0", bot_id: "BBUTLER", bot_profile: { name: "GitHub Butler" }, text: "Issue created: repo#1" },
+    ];
+    const client = makeClient({ U1: "Alice" }, { ownBotId: "BBUTLER" });
+    const result = await compileThreadWithMeta(client, messages);
+    assert.ok(result.includes("TypeError: boom"));
+    assert.ok(result.includes("investigating"));
+    assert.ok(!result.includes("Issue created"));
+  });
+
+  test("extracts bot message content from attachments when text is empty", async () => {
+    const messages = [
+      {
+        ts: "1000.0",
+        bot_id: "BSENTRY",
+        bot_profile: { name: "Sentry" },
+        text: "",
+        attachments: [{ text: "Null check operator used on a null value" }],
+      },
+    ];
+    const client = makeClient({}, { ownBotId: "BBUTLER" });
+    const result = await compileThreadWithMeta(client, messages);
+    assert.ok(result.includes("Null check operator used on a null value"));
+    assert.ok(result.includes("Sentry"));
+  });
+
+  test("extracts bot message content from blocks when text and attachments are empty", async () => {
+    const messages = [
+      {
+        ts: "1000.0",
+        bot_id: "BSENTRY",
+        bot_profile: { name: "Sentry" },
+        text: "",
+        blocks: [{ type: "section", text: { type: "mrkdwn", text: "Alert fired" } }],
+      },
+    ];
+    const client = makeClient({}, { ownBotId: "BBUTLER" });
+    const result = await compileThreadWithMeta(client, messages);
+    assert.ok(result.includes("Alert fired"));
+  });
+});
+
+describe("extractMessageText", () => {
+  test("returns text when present", () => {
+    assert.equal(extractMessageText({ text: "Hello" }), "Hello");
+  });
+
+  test("returns empty string for file_share messages", () => {
+    assert.equal(extractMessageText({ subtype: "file_share", text: "image.png" }), "");
+  });
+
+  test("falls back to attachment text when message text is empty", () => {
+    const msg = { text: "", attachments: [{ text: "from attachment" }] };
+    assert.equal(extractMessageText(msg), "from attachment");
+  });
+
+  test("prefers attachment.text, then fallback, then title", () => {
+    assert.equal(
+      extractMessageText({ text: "", attachments: [{ fallback: "fb", title: "tt" }] }),
+      "fb"
+    );
+    assert.equal(extractMessageText({ text: "", attachments: [{ title: "tt" }] }), "tt");
+  });
+
+  test("falls back to section block text when text and attachments are empty", () => {
+    const msg = {
+      text: "",
+      blocks: [{ type: "section", text: { type: "mrkdwn", text: "hello" } }],
+    };
+    assert.equal(extractMessageText(msg), "hello");
+  });
+
+  test("returns empty string when nothing is available", () => {
+    assert.equal(extractMessageText({}), "");
+    assert.equal(extractMessageText(null), "");
   });
 });
