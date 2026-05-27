@@ -9,7 +9,7 @@ No public URL required. Runs over a persistent outbound WebSocket (Socket Mode).
 ## Features
 
 - **Message shortcut** — right-click any Slack message to open the issue creation modal
-- **Slash command** — `/issue`, `/issue <title>`, `/issue <repo>#<num>`, `/issue search <query>`
+- **Slash command** — `/issue`, `/issue <title>`, `/issue <repo>#<num>`
 - **@mention** — mention the bot in a thread to get a prompt with Create Issue and Quick Create buttons; end with `^` (e.g. `@github-butler ^` or `@github-butler summarise that ^`) to instantly create an issue from the previous message
 - **Emoji reaction** — react with `:github_butler:` or `:<repo>_github_butler:` to create an issue from the reacted message; re-reacting updates the linked issue with new thread messages
 - **Labels, milestones, and GitHub Projects v2** — load dynamically per repo; custom project fields (single-select, number, text) are supported
@@ -106,7 +106,6 @@ The message text pre-fills the issue body. Pick a repo and the labels, milestone
 /issue Fix the login bug      open the modal with the title pre-filled
 /issue 123                    look up issue #123 in your last-used repo
 /issue frontend#42            look up issue #42 in the "frontend" repo
-/issue search login           search open issues matching "login"
 ```
 
 > Slash commands only work at the channel level — Slack does not support them inside threads. Use @mention instead.

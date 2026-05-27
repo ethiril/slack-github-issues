@@ -2,7 +2,7 @@ import bolt from "@slack/bolt";
 import { Octokit } from "@octokit/rest";
 import { SecretsManagerClient, GetSecretValueCommand } from "@aws-sdk/client-secrets-manager";
 import { createGitHubHelpers } from "./src/github.js";
-import { registerHandlers } from "./src/handlers.js";
+import { registerHandlers } from "./src/handlers/index.js";
 
 const { App, AwsLambdaReceiver } = bolt;
 

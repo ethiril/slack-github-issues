@@ -1,43 +1,6 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { compileThread, compileThreadWithMeta, deriveTitle, deriveBotAlertTitle, extractMessageText } from "../src/thread.js";
-
-describe("compileThread", () => {
-  test("returns empty string for empty array", () => {
-    assert.equal(compileThread([]), "");
-  });
-
-  test("formats a single message as a blockquote", () => {
-    const result = compileThread([{ text: "Hello world" }]);
-    assert.ok(result.startsWith("**Full thread:**"));
-    assert.ok(result.includes("> Hello world"));
-  });
-
-  test("formats multiple messages", () => {
-    const result = compileThread([
-      { text: "First message" },
-      { text: "Second message" },
-    ]);
-    assert.ok(result.includes("> First message"));
-    assert.ok(result.includes("> Second message"));
-  });
-
-  test("indents continuation lines within a multi-line message", () => {
-    const result = compileThread([{ text: "Line 1\nLine 2" }]);
-    assert.ok(result.includes("> Line 1\n> Line 2"));
-  });
-
-  test("skips messages with empty text", () => {
-    const result = compileThread([{ text: "Hello" }, { text: "" }, { text: "World" }]);
-    const quoteLines = result.split("\n").filter((l) => l.startsWith("> ") && l.trim() !== ">");
-    assert.equal(quoteLines.length, 2);
-  });
-
-  test("handles messages with null text", () => {
-    const result = compileThread([{ text: null }, { text: "Valid message" }]);
-    assert.ok(result.includes("> Valid message"));
-  });
-});
+import { compileThreadWithMeta, deriveTitle, deriveBotAlertTitle, extractMessageText } from "../src/thread.js";
 
 describe("deriveTitle", () => {
   test("returns the first line of a multi-line text", () => {

@@ -15,6 +15,11 @@ const memoryMap = new Map();
 // Prevents duplicate cards from Lambda retries or rapid reactions.
 const claimedCards = new Set();
 
+// In-memory event-dedup map (process-local fallback when DynamoDB is absent).
+// Keyed on an event/action identity; entries expire after EVENT_DEDUP_MS.
+const seenEvents = new Map();
+const EVENT_DEDUP_MS = 60 * 60 * 1000; // 1h, matches the DynamoDB ttl below
+
 // DynamoDB client — created lazily only if TABLE is set, to avoid loading the
 // AWS SDK in local Socket Mode where DynamoDB is not used.
 let dynamo = null;
@@ -98,6 +103,45 @@ export async function releaseCardPost(threadTs) {
   })).catch(() => {}); // Ignore if item doesn't exist or is a real issue
 }
 
+// Cross-instance event dedup. Returns true if THIS caller claimed the event
+// (it should proceed), false if it was already claimed (a retry/duplicate —
+// skip). Mirrors claimCardPost, but for arbitrary event/action identities so
+// Lambda retries that land on a different instance are dropped.
+//
+// DynamoDB rows use a distinct `evt#…` PK namespace so they never collide with
+// real thread rows read by getThreadIssue. A `ttl` epoch attribute lets the
+// table expire them if TTL is configured on the table; if it isn't, the rows
+// simply persist (harmless — they are never read except by this conditional put).
+export async function claimEvent(key) {
+  if (!TABLE) {
+    const now = Date.now();
+    for (const [k, t] of seenEvents) {
+      if (now - t > EVENT_DEDUP_MS) seenEvents.delete(k);
+    }
+    if (seenEvents.has(key)) return false;
+    seenEvents.set(key, now);
+    return true;
+  }
+
+  const { PutCommand } = await import("@aws-sdk/lib-dynamodb");
+  const db = await getDynamo();
+  try {
+    await db.send(new PutCommand({
+      TableName: TABLE,
+      Item: {
+        threadTs: `evt#${key}`,
+        status: "event_seen",
+        ttl: Math.floor(Date.now() / 1000) + EVENT_DEDUP_MS / 1000,
+      },
+      ConditionExpression: "attribute_not_exists(threadTs)",
+    }));
+    return true;
+  } catch (err) {
+    if (err.name === "ConditionalCheckFailedException") return false;
+    throw err;
+  }
+}
+
 export async function registerThreadIssue(threadTs, repo, issueNumber, lastSyncedTs, parentIncluded = false) {
   if (!TABLE) {
     memoryMap.set(threadTs, { repo, issueNumber, lastSyncedTs, parentIncluded });
@@ -130,45 +174,9 @@ export async function getThreadIssue(threadTs) {
   return { parentIncluded: false, ...item };
 }
 
-export async function updateThreadIssueSyncTs(threadTs, lastSyncedTs) {
-  if (!TABLE) {
-    const entry = memoryMap.get(threadTs);
-    if (entry) entry.lastSyncedTs = lastSyncedTs;
-    return;
-  }
-
-  const { UpdateCommand } = await import("@aws-sdk/lib-dynamodb");
-  const db = await getDynamo();
-  await db.send(new UpdateCommand({
-    TableName: TABLE,
-    Key: { threadTs },
-    UpdateExpression: "SET lastSyncedTs = :ts",
-    ExpressionAttributeValues: { ":ts": lastSyncedTs },
-  }));
-}
-
-// Mark the thread's parent/root message as having been included in the issue
-// (either in the initial body or in a prior thread-update comment). Prevents
-// subsequent tag-update comments from re-embedding the same parent content.
-export async function markParentIncluded(threadTs) {
-  if (!TABLE) {
-    const entry = memoryMap.get(threadTs);
-    if (entry) entry.parentIncluded = true;
-    return;
-  }
-
-  const { UpdateCommand } = await import("@aws-sdk/lib-dynamodb");
-  const db = await getDynamo();
-  await db.send(new UpdateCommand({
-    TableName: TABLE,
-    Key: { threadTs },
-    UpdateExpression: "SET parentIncluded = :t",
-    ExpressionAttributeValues: { ":t": true },
-  }));
-}
-
 // For testing only
 export function clearThreadIssueMap() {
   memoryMap.clear();
   claimedCards.clear();
+  seenEvents.clear();
 }

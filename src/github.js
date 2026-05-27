@@ -318,16 +318,6 @@ async function getRepos() {
     return data;
   }
 
-  async function searchIssues(query) {
-    const { data } = await octokit.rest.search.issuesAndPullRequests({
-      q: `${query} user:${githubOwner} is:issue`,
-      per_page: 10,
-      sort: "updated",
-      order: "desc",
-    });
-    return data.items;
-  }
-
   async function addIssueComment(repo, issueNumber, body) {
     const { data } = await octokit.rest.issues.createComment({
       owner: githubOwner,
@@ -385,7 +375,6 @@ async function getRepos() {
     setProjectItemFields,
     linkParentIssue,
     getIssue,
-    searchIssues,
     addIssueComment,
     getIssueTypes,
     setIssueType,
