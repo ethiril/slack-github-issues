@@ -3,8 +3,7 @@ import assert from "node:assert/strict";
 import {
   registerThreadIssue,
   getThreadIssue,
-  updateThreadIssueSyncTs,
-  markParentIncluded,
+  claimEvent,
   clearThreadIssueMap,
 } from "../src/thread-store.js";
 
@@ -21,16 +20,6 @@ describe("thread-store", () => {
     assert.equal(entry.repo, "my-repo");
     assert.equal(entry.issueNumber, 42);
     assert.equal(entry.lastSyncedTs, "999.0");
-  });
-
-  test("updateThreadIssueSyncTs updates lastSyncedTs for known threadTs", async () => {
-    await registerThreadIssue("2000.0", "backend", 7, "1900.0");
-    await updateThreadIssueSyncTs("2000.0", "2100.0");
-    assert.equal((await getThreadIssue("2000.0")).lastSyncedTs, "2100.0");
-  });
-
-  test("updateThreadIssueSyncTs is a no-op for unknown threadTs", async () => {
-    await assert.doesNotReject(() => updateThreadIssueSyncTs("nope.0", "1234.0"));
   });
 
   test("clearThreadIssueMap removes all entries", async () => {
@@ -64,14 +53,26 @@ describe("thread-store", () => {
     assert.equal((await getThreadIssue("4001.0")).parentIncluded, true);
   });
 
-  test("markParentIncluded flips the flag for known threadTs", async () => {
-    await registerThreadIssue("5000.0", "repo", 7, "4900.0");
-    assert.equal((await getThreadIssue("5000.0")).parentIncluded, false);
-    await markParentIncluded("5000.0");
-    assert.equal((await getThreadIssue("5000.0")).parentIncluded, true);
+  test("claimEvent returns true the first time and false for the same key", async () => {
+    assert.equal(await claimEvent("mention:111.0"), true);
+    assert.equal(await claimEvent("mention:111.0"), false);
   });
 
-  test("markParentIncluded is a no-op for unknown threadTs", async () => {
-    await assert.doesNotReject(() => markParentIncluded("missing.0"));
+  test("claimEvent claims distinct keys independently", async () => {
+    assert.equal(await claimEvent("reaction:1.0"), true);
+    assert.equal(await claimEvent("reaction:2.0"), true);
+    assert.equal(await claimEvent("reaction:1.0"), false);
+  });
+
+  test("claimEvent state is cleared by clearThreadIssueMap", async () => {
+    assert.equal(await claimEvent("view:abc"), true);
+    clearThreadIssueMap();
+    assert.equal(await claimEvent("view:abc"), true);
+  });
+
+  test("claimEvent keys never shadow real thread entries", async () => {
+    await claimEvent("mention:9000.0");
+    // The dedup row uses an evt# PK namespace, so the thread lookup is unaffected.
+    assert.equal(await getThreadIssue("mention:9000.0"), null);
   });
 });

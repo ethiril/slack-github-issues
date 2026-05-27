@@ -333,23 +333,4 @@ describe("createGitHubHelpers", () => {
     assert.equal(capturedParams.issue_number, 99);
     assert.equal(capturedParams.body, "Great issue!");
   });
-
-  test("searchIssues scopes query to the configured owner", async () => {
-    let capturedQuery;
-    const mockOctokit = {
-      rest: {
-        search: {
-          issuesAndPullRequests: async ({ q }) => {
-            capturedQuery = q;
-            return { data: { items: [] } };
-          },
-        },
-      },
-    };
-    const github = createGitHubHelpers(mockOctokit, "acme-corp");
-    await github.searchIssues("login bug");
-    assert.ok(capturedQuery.includes("user:acme-corp"));
-    assert.ok(capturedQuery.includes("login bug"));
-    assert.ok(capturedQuery.includes("is:issue"));
-  });
 });

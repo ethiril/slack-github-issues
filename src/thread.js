@@ -7,6 +7,19 @@ export async function fetchThreadMessages(client, channelId, threadTs) {
   return result?.messages ?? [];
 }
 
+// Resolves the message that started a thread (its root/parent), used to seed an
+// issue's title and body from the original message rather than whatever message
+// happened to be above the tag/reaction. conversations.replies returns messages
+// in chronological order with the parent first, so the root is the first message
+// that isn't one of Butler's own posts. For a non-threaded message, threadTs is
+// the message's own ts and the single returned message is the root.
+export async function resolveThreadRootMessage(client, channelId, threadTs) {
+  const messages = await fetchThreadMessages(client, channelId, threadTs);
+  const { botId } = await getOwnBotIdentity(client);
+  const root = messages.find((message) => (botId ? message.bot_id !== botId : true)) ?? messages[0] ?? null;
+  return { root, messages };
+}
+
 const _clientIdentityCache = new WeakMap();
 
 // Resolves this bot's own identity (bot_id, user_id) via auth.test, cached per
@@ -82,15 +95,6 @@ export function extractMessageText(message) {
   if (attachmentText) return attachmentText;
 
   return blocksText;
-}
-
-export function compileThread(messages) {
-  if (messages.length === 0) return "";
-  const lines = messages
-    .map((msg) => (msg.text ?? "").replace(/\n/g, "\n> "))
-    .filter(Boolean)
-    .map((text) => `> ${text}`);
-  return "**Full thread:**\n\n" + lines.join("\n>\n");
 }
 
 function formatSlackTimestamp(slackTs) {
